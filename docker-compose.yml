@@ -27,7 +27,7 @@ services:
     volumes:
       - ./data:/data
     ports:
-      - "8080:8080"
+      - "38080:8080"
     restart: unless-stopped
 
   frontend:
@@ -39,7 +39,7 @@ services:
       # Vite needs this to accept connections from host network
       - VITE_HOST=0.0.0.0
     ports:
-      - "5173:5173"
+      - "35173:5173"
     depends_on:
       - backend
     restart: unless-stopped
