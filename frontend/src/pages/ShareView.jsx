@@ -1,5 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
+import "highlight.js/styles/github.css";
+
 import { apiFetch } from "../api";
 
 export default function ShareView() {
@@ -28,7 +33,9 @@ export default function ShareView() {
             </div>
             <h2>{note.title}</h2>
             <pre style={{ whiteSpace: "pre-wrap", padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
-        {note.content}
+        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+          {note.content}
+        </ReactMarkdown>
       </pre>
         </div>
     );

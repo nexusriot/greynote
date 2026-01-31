@@ -1,5 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
+import "highlight.js/styles/github.css";
 import { apiFetch } from "../api";
 
 export default function NoteEdit() {
@@ -8,6 +12,7 @@ export default function NoteEdit() {
     const [note, setNote] = useState(null);
     const [err, setErr] = useState("");
     const [shareUrl, setShareUrl] = useState("");
+    const [preview, setPreview] = useState(true);
 
     const fullShareLink = useMemo(() => {
         if (!shareUrl) return "";
@@ -68,8 +73,11 @@ export default function NoteEdit() {
             <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={() => nav("/")}>← Back</button>
                 <button onClick={save}>Save</button>
-                <button onClick={del} style={{ marginLeft: "auto" }}>Delete</button>
+                <button onClick={del} style={{ marginLeft: "auto" }}>
+                    Delete
+                </button>
             </div>
+
             <div style={{ display: "flex", gap: 12, opacity: 0.75, fontSize: 12 }}>
                 <span>Created: {new Date(note.createdAt).toLocaleString()}</span>
                 <span>Updated: {new Date(note.updatedAt).toLocaleString()}</span>
@@ -80,12 +88,35 @@ export default function NoteEdit() {
                 onChange={(e) => setNote({ ...note, title: e.target.value })}
                 style={{ fontSize: 18, padding: 8 }}
             />
-            <textarea
-                value={note.content}
-                onChange={(e) => setNote({ ...note, content: e.target.value })}
-                rows={14}
-                style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", padding: 8 }}
-            />
+
+            {/* Preview toggle */}
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <button onClick={() => setPreview(!preview)}>
+                    {preview ? "Edit" : "Preview"}
+                </button>
+                <span style={{ opacity: 0.7, fontSize: 12 }}>
+        Tip: use ``` for code blocks
+      </span>
+            </div>
+
+            {/* Editor OR Preview (conditional render) */}
+            {preview ? (
+                <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                        {note.content}
+                    </ReactMarkdown>
+                </div>
+            ) : (
+                <textarea
+                    value={note.content}
+                    onChange={(e) => setNote({ ...note, content: e.target.value })}
+                    rows={14}
+                    style={{
+                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                        padding: 8,
+                    }}
+                />
+            )}
 
             <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
                 <div style={{ fontWeight: 700, marginBottom: 8 }}>Sharing</div>
