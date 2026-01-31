@@ -18,7 +18,9 @@ type Config struct {
 	CookieName   string
 	CookieSecure bool
 
-	SessionTTL time.Duration
+	SessionTTL    time.Duration
+	AdminEmail    string
+	AdminPassword string
 }
 
 func getenv(key, def string) string {
@@ -41,6 +43,8 @@ func mustLoadConfig() Config {
 	if err != nil || ttlHours <= 0 {
 		ttlHours = 168
 	}
+	adminEmail := getenv("ADMIN_EMAIL", "")
+	adminPassword := getenv("ADMIN_PASSWORD", "")
 
 	return Config{
 		Addr:           addr,
@@ -49,6 +53,8 @@ func mustLoadConfig() Config {
 		CookieName:     cookieName,
 		CookieSecure:   cookieSecure,
 		SessionTTL:     time.Duration(ttlHours) * time.Hour,
+		AdminEmail:     adminEmail,
+		AdminPassword:  adminPassword,
 	}
 }
 
@@ -60,6 +66,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer db.Close()
+	if err := ensureAdminUser(db, cfg.AdminEmail, cfg.AdminPassword); err != nil {
+		log.Fatal(err)
+	}
 
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
@@ -74,7 +83,7 @@ func main() {
 	api := r.Group("/api")
 	{
 		// auth (public)
-		api.POST("/register", auth.Register)
+		//api.POST("/register", auth.Register)
 		api.POST("/login", auth.Login)
 		api.POST("/logout", auth.Logout)
 
@@ -85,6 +94,14 @@ func main() {
 		pr := api.Group("/")
 		pr.Use(AuthRequired(db, cfg.CookieName))
 		{
+			admin := pr.Group("/admin")
+			admin.Use(AdminRequired(db))
+			{
+				admin.POST("/users", auth.CreateUserAdmin)
+				admin.PUT("/users/:id/admin", auth.SetAdminFlag)
+				admin.GET("/users", auth.ListUsersAdmin) // optional
+			}
+
 			pr.GET("/me", auth.Me)
 
 			pr.GET("/notes", notes.List)

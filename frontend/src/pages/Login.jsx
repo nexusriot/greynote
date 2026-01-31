@@ -29,8 +29,8 @@ export default function Login() {
                 <input placeholder="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
                 <button type="submit">Login</button>
             </form>
-            <p>
-                No account? <Link to="/register">Register</Link>
+            <p style={{ opacity: 0.75, fontSize: 12 }}>
+                New accounts are created by an admin.
             </p>
         </div>
     );

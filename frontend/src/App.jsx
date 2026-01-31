@@ -2,7 +2,7 @@ import React from "react";
 import { BrowserRouter, Routes, Route, Navigate, Link } from "react-router-dom";
 import { AuthProvider, useAuth } from "./auth";
 import Login from "./pages/Login";
-import Register from "./pages/Register";
+// import Register from "./pages/Register";
 import Notes from "./pages/Notes";
 import NoteEdit from "./pages/NoteEdit";
 import ShareView from "./pages/ShareView";
@@ -43,7 +43,7 @@ export default function App() {
                 <Shell>
                     <Routes>
                         <Route path="/login" element={<Login />} />
-                        <Route path="/register" element={<Register />} />
+                        {/*<Route path="/register" element={<Register />} />*/}
 
                         <Route
                             path="/"

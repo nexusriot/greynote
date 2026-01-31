@@ -1,0 +1,9 @@
+# login as admin, store cookie
+curl -i -c cookie.txt -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"supersecret123"}' \
+  http://localhost:8080/api/login
+
+# create another admin user
+curl -i -b cookie.txt -H 'Content-Type: application/json' \
+  -d '{"email":"admin2@example.com","password":"supersecret456","isAdmin":true}' \
+  http://localhost:8080/api/admin/users

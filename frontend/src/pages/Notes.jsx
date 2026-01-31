@@ -37,11 +37,11 @@ export default function Notes() {
             <div style={{ display: "grid", gap: 8 }}>
                 {notes.map((n) => (
                     <Link key={n.id} to={`/notes/${n.id}`} style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, textDecoration: "none" }}>
-                        <div style={{ fontWeight: 700 }}>{n.title}</div>
                         <div style={{ display: "flex", gap: 12, opacity: 0.75, fontSize: 12, marginTop: 6 }}>
                             <span>Created: {fmt(n.createdAt)}</span>
                             <span>Updated: {fmt(n.updatedAt)}</span>
                         </div>
+                        <div style={{ fontWeight: 700 }}>{n.title}</div>
                         <div style={{ opacity: 0.7, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{n.content}</div>
                     </Link>
                 ))}
