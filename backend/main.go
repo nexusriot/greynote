@@ -97,9 +97,10 @@ func main() {
 			admin := pr.Group("/admin")
 			admin.Use(AdminRequired(db))
 			{
+				admin.GET("/users", auth.ListUsersAdmin)
 				admin.POST("/users", auth.CreateUserAdmin)
 				admin.PUT("/users/:id/admin", auth.SetAdminFlag)
-				admin.GET("/users", auth.ListUsersAdmin) // optional
+				admin.DELETE("/users/:id", auth.DeleteUserAdmin)
 			}
 
 			pr.GET("/me", auth.Me)

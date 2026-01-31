@@ -123,13 +123,71 @@ func (h *AuthHandlers) Me(c *gin.Context) {
 	userID := getUserID(c)
 
 	var email string
-	err := h.DB.QueryRow(`SELECT email FROM users WHERE id = ?`, userID).Scan(&email)
+	var isAdmin int
+	err := h.DB.QueryRow(`SELECT email, is_admin FROM users WHERE id = ?`, userID).Scan(&email, &isAdmin)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"userId": userID, "email": email})
+	c.JSON(http.StatusOK, gin.H{
+		"userId":  userID,
+		"email":   email,
+		"isAdmin": isAdmin == 1,
+	})
+}
+
+func (h *AuthHandlers) DeleteUserAdmin(c *gin.Context) {
+	targetID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || targetID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bad user id"})
+		return
+	}
+
+	// safety: do not allow deleting yourself
+	if targetID == getUserID(c) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete yourself"})
+		return
+	}
+
+	tx, err := h.DB.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer tx.Rollback()
+
+	// delete share links for notes of this user
+	_, _ = tx.Exec(`
+		DELETE FROM share_links
+		WHERE note_id IN (SELECT id FROM notes WHERE user_id = ?)`,
+		targetID,
+	)
+
+	// delete notes
+	_, _ = tx.Exec(`DELETE FROM notes WHERE user_id = ?`, targetID)
+
+	// delete sessions (if any)
+	_, _ = tx.Exec(`DELETE FROM sessions WHERE user_id = ?`, targetID)
+
+	// delete user
+	res, err := tx.Exec(`DELETE FROM users WHERE id = ?`, targetID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	aff, _ := res.RowsAffected()
+	if aff == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
 }
 
 func (h *AuthHandlers) CreateUserAdmin(c *gin.Context) {

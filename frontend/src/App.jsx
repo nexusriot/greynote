@@ -6,6 +6,7 @@ import Login from "./pages/Login";
 import Notes from "./pages/Notes";
 import NoteEdit from "./pages/NoteEdit";
 import ShareView from "./pages/ShareView";
+import AdminUsers from "./pages/AdminUsers";
 
 function Shell({ children }) {
     const { me, loading, logout } = useAuth();
@@ -44,6 +45,7 @@ export default function App() {
                     <Routes>
                         <Route path="/login" element={<Login />} />
                         {/*<Route path="/register" element={<Register />} />*/}
+                        <Route path="/admin/users" element={<AdminUsers />} />
 
                         <Route
                             path="/"
