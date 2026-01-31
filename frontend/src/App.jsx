@@ -13,7 +13,17 @@ function Shell({ children }) {
     return (
         <div style={{ maxWidth: 900, margin: "0 auto", padding: 16, fontFamily: "system-ui" }}>
             <header style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
-                <Link to="/" style={{ fontWeight: 700, textDecoration: "none" }}>Notes</Link>
+                <Link to="/" style={{ fontWeight: 700, textDecoration: "none" }}>
+                    Notes
+                </Link>
+
+                {/* Admin-only nav item */}
+                {loading ? null : me?.isAdmin ? (
+                    <Link to="/admin/users" style={{ textDecoration: "none" }}>
+                        Users
+                    </Link>
+                ) : null}
+
                 <div style={{ marginLeft: "auto" }}>
                     {loading ? null : me ? (
                         <>
@@ -45,8 +55,14 @@ export default function App() {
                     <Routes>
                         <Route path="/login" element={<Login />} />
                         {/*<Route path="/register" element={<Register />} />*/}
-                        <Route path="/admin/users" element={<AdminUsers />} />
-
+                        <Route
+                            path="/admin/users"
+                            element={
+                                <RequireAuth>
+                                    <AdminUsers />
+                                </RequireAuth>
+                            }
+                        />
                         <Route
                             path="/"
                             element={

@@ -1,5 +1,6 @@
 services:
   backend:
+    image: greynote-backend:latest
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -30,6 +31,7 @@ services:
     restart: unless-stopped
 
   frontend:
+    image: greynote-frontend:latest
     build:
       context: ./frontend
       dockerfile: Dockerfile

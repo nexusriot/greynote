@@ -7,25 +7,23 @@ export function AuthProvider({ children }) {
     const [me, setMe] = useState(null);
     const [loading, setLoading] = useState(true);
 
-    async function refresh() {
+    async function refreshMe() {
         try {
-            const data = await apiFetch("/api/me");
-            setMe(data);
+            const m = await apiFetch("/api/me");
+            setMe(m);
+            return m;
         } catch {
             setMe(null);
-        } finally {
-            setLoading(false);
+            return null;
         }
     }
 
     async function login(email, password) {
-        await apiFetch("/api/login", { method: "POST", body: { email, password } });
-        await refresh();
-    }
-
-    async function register(email, password) {
-        await apiFetch("/api/register", { method: "POST", body: { email, password } });
-        await login(email, password);
+        await apiFetch("/api/login", {
+            method: "POST",
+            body: { email, password },
+        });
+        await refreshMe();
     }
 
     async function logout() {
@@ -33,15 +31,22 @@ export function AuthProvider({ children }) {
         setMe(null);
     }
 
-    useEffect(() => { refresh(); }, []);
+    useEffect(() => {
+        (async () => {
+            await refreshMe();
+            setLoading(false);
+        })();
+    }, []);
 
     return (
-        <AuthCtx.Provider value={{ me, loading, login, register, logout, refresh }}>
+        <AuthCtx.Provider value={{ me, loading, login, logout, refreshMe }}>
             {children}
         </AuthCtx.Provider>
     );
 }
 
 export function useAuth() {
-    return useContext(AuthCtx);
+    const v = useContext(AuthCtx);
+    if (!v) throw new Error("useAuth must be used inside AuthProvider");
+    return v;
 }
