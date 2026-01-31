@@ -70,6 +70,10 @@ export default function NoteEdit() {
                 <button onClick={save}>Save</button>
                 <button onClick={del} style={{ marginLeft: "auto" }}>Delete</button>
             </div>
+            <div style={{ display: "flex", gap: 12, opacity: 0.75, fontSize: 12 }}>
+                <span>Created: {new Date(note.createdAt).toLocaleString()}</span>
+                <span>Updated: {new Date(note.updatedAt).toLocaleString()}</span>
+            </div>
 
             <input
                 value={note.title}
