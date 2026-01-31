@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      # Listen on container port 8080
+      ADDR: ":8080"
+
+      # Persist sqlite in a named volume
+      SQLITE_PATH: "/data/notes.db"
+
+      # Allow browser requests from the frontend origin
+      FRONTEND_ORIGIN: "http://localhost:5173"
+
+      COOKIE_NAME: "notes_session"
+      # For local dev over http
+      COOKIE_SECURE: "0"
+
+      # 7 days
+      SESSION_TTL_HOURS: "168"
+    volumes:
+      - ./data:/data
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      # Vite needs this to accept connections from host network
+      - VITE_HOST=0.0.0.0
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  notes_data:
