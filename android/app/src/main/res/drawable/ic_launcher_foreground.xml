@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive icon foreground. Safe zone: inner 72×72dp centred in the 108×108dp viewport.
+  The notepad body sits from (24,14) to (84,94) — well within the safe zone.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:viewportWidth="108"
+    android:viewportHeight="108"
+    android:width="108dp"
+    android:height="108dp">
+
+    <!-- Notepad body (white card) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="
+            M30,14 L78,14
+            Q84,14 84,20
+            L84,94
+            Q84,100 78,100
+            L30,100
+            Q24,100 24,94
+            L24,20
+            Q24,14 30,14 Z" />
+
+    <!-- Top header band -->
+    <path
+        android:fillColor="#B0BEC5"
+        android:pathData="
+            M24,20
+            Q24,14 30,14
+            L78,14
+            Q84,14 84,20
+            L84,34
+            L24,34 Z" />
+
+    <!-- Spiral binding dots on header -->
+    <path
+        android:fillColor="#546E7A"
+        android:pathData="M40,14 A4,5 0 1,0 40,24 A4,5 0 1,0 40,14 Z" />
+    <path
+        android:fillColor="#546E7A"
+        android:pathData="M54,14 A4,5 0 1,0 54,24 A4,5 0 1,0 54,14 Z" />
+    <path
+        android:fillColor="#546E7A"
+        android:pathData="M68,14 A4,5 0 1,0 68,24 A4,5 0 1,0 68,14 Z" />
+
+    <!-- Text lines -->
+    <path
+        android:fillColor="#90A4AE"
+        android:pathData="M32,46 L76,46 Q77,46 77,48 Q77,50 76,50 L32,50 Q31,50 31,48 Q31,46 32,46 Z" />
+    <path
+        android:fillColor="#90A4AE"
+        android:pathData="M32,58 L76,58 Q77,58 77,60 Q77,62 76,62 L32,62 Q31,62 31,60 Q31,58 32,58 Z" />
+    <path
+        android:fillColor="#90A4AE"
+        android:pathData="M32,70 L76,70 Q77,70 77,72 Q77,74 76,74 L32,74 Q31,74 31,72 Q31,70 32,70 Z" />
+    <path
+        android:fillColor="#90A4AE"
+        android:pathData="M32,82 L60,82 Q61,82 61,84 Q61,86 60,86 L32,86 Q31,86 31,84 Q31,82 32,82 Z" />
+
+</vector>

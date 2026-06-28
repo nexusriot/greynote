@@ -85,7 +85,7 @@ export default function AdminUsers() {
         }
     }
 
-    if (err) return <div style={{ color: "crimson" }}>{err}</div>;
+    if (err) return <div style={{ color: "var(--color-danger)" }}>{err}</div>;
     if (!me) return <div>Loading...</div>;
 
     if (!me.isAdmin) {
@@ -104,7 +104,7 @@ export default function AdminUsers() {
                 <div style={{ fontWeight: 700 }}>Users</div>
             </div>
 
-            <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, display: "grid", gap: 8 }}>
+            <div style={{ padding: 12, border: "1px solid var(--color-border)", borderRadius: 8, display: "grid", gap: 8 }}>
                 <div style={{ fontWeight: 700 }}>Create user</div>
 
                 <input
@@ -134,12 +134,12 @@ export default function AdminUsers() {
                 </button>
             </div>
 
-            <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
+            <div style={{ padding: 12, border: "1px solid var(--color-border)", borderRadius: 8 }}>
                 <div style={{ fontWeight: 700, marginBottom: 8 }}>Existing users</div>
 
                 <div style={{ display: "grid", gap: 8 }}>
                     {users.map((u) => (
-                        <div key={u.id} style={{ display: "grid", gap: 6, padding: 10, border: "1px solid #eee", borderRadius: 8 }}>
+                        <div key={u.id} style={{ display: "grid", gap: 6, padding: 10, border: "1px solid var(--color-border-light)", borderRadius: 8 }}>
                             <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                                 <div style={{ fontWeight: 600 }}>{u.email}</div>
                                 <div style={{ opacity: 0.7 }}>id: {u.id}</div>

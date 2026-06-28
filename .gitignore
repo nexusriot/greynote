@@ -1,2 +1,43 @@
+# IDE
 .idea/
-data/
+*.iml
+.vscode/
+
+# Runtime data (anchored to repo root — do NOT ignore the Android `data/` source package)
+/data/
+cookie.txt
+
+# Go build output
+backend/greynote
+backend/*.exe
+*.test
+
+# Frontend build & deps
+frontend/node_modules/
+frontend/dist/
+
+# Android build
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+android/app/release/
+android/captures/
+
+# Android signing secrets
+*.jks
+*.keystore
+keystore.properties
+
+# Gradle wrapper binary (keep .properties, ignore jars)
+android/gradle/wrapper/gradle-wrapper.jar
+android/gradlew
+android/gradlew.bat
+
+# Secrets / local env
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db

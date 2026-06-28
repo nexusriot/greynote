@@ -264,6 +264,142 @@ func (h *AuthHandlers) SetAdminFlag(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+func (h *AuthHandlers) ChangePassword(c *gin.Context) {
+	userID := getUserID(c)
+
+	var req struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bad json"})
+		return
+	}
+	if len(req.NewPassword) < 6 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new password min 6 chars"})
+		return
+	}
+
+	var hash string
+	if err := h.DB.QueryRow(`SELECT password_hash FROM users WHERE id = ?`, userID).Scan(&hash); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.CurrentPassword)) != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "current password is incorrect"})
+		return
+	}
+
+	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "hash error"})
+		return
+	}
+	_, _ = h.DB.Exec(`UPDATE users SET password_hash = ? WHERE id = ?`, string(newHash), userID)
+	c.Status(http.StatusNoContent)
+}
+
+func (h *AuthHandlers) DeleteAccount(c *gin.Context) {
+	userID := getUserID(c)
+
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bad json"})
+		return
+	}
+
+	var hash string
+	if err := h.DB.QueryRow(`SELECT password_hash FROM users WHERE id = ?`, userID).Scan(&hash); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "password is incorrect"})
+		return
+	}
+
+	tx, err := h.DB.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer tx.Rollback()
+
+	_, _ = tx.Exec(`DELETE FROM share_links WHERE note_id IN (SELECT id FROM notes WHERE user_id = ?)`, userID)
+	_, _ = tx.Exec(`DELETE FROM note_versions WHERE note_id IN (SELECT id FROM notes WHERE user_id = ?)`, userID)
+	_, _ = tx.Exec(`DELETE FROM notes WHERE user_id = ?`, userID)
+	_, _ = tx.Exec(`DELETE FROM sessions WHERE user_id = ?`, userID)
+	if _, err := tx.Exec(`DELETE FROM users WHERE id = ?`, userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(h.Cfg.CookieName, "", -1, "/", "", h.Cfg.CookieSecure, true)
+	c.Status(http.StatusNoContent)
+}
+
+func (h *AuthHandlers) ListSessions(c *gin.Context) {
+	userID := getUserID(c)
+	currentToken, _ := c.Cookie(h.Cfg.CookieName)
+
+	rows, err := h.DB.Query(
+		`SELECT id, created_at, expires_at, token FROM sessions WHERE user_id = ? ORDER BY created_at DESC`,
+		userID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	defer rows.Close()
+
+	type sessionDTO struct {
+		ID        int64  `json:"id"`
+		CreatedAt string `json:"createdAt"`
+		ExpiresAt string `json:"expiresAt"`
+		IsCurrent bool   `json:"isCurrent"`
+	}
+
+	out := []sessionDTO{}
+	for rows.Next() {
+		var s sessionDTO
+		var token string
+		if err := rows.Scan(&s.ID, &s.CreatedAt, &s.ExpiresAt, &token); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+			return
+		}
+		s.IsCurrent = token == currentToken
+		out = append(out, s)
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (h *AuthHandlers) RevokeSession(c *gin.Context) {
+	userID := getUserID(c)
+	sessionID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || sessionID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bad session id"})
+		return
+	}
+
+	res, err := h.DB.Exec(`DELETE FROM sessions WHERE id = ? AND user_id = ?`, sessionID, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if aff, _ := res.RowsAffected(); aff == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 func (h *AuthHandlers) ListUsersAdmin(c *gin.Context) {
 	rows, err := h.DB.Query(`SELECT id, email, is_admin, created_at FROM users ORDER BY id`)
 	if err != nil {

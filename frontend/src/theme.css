@@ -1,0 +1,79 @@
+:root {
+  --color-bg: #ffffff;
+  --color-surface: #f5f5f5;
+  --color-border: #ddd;
+  --color-border-light: #eee;
+  --color-text: #111111;
+  --color-text-muted: rgba(0, 0, 0, 0.55);
+  --color-danger: crimson;
+  --color-accent: #0066cc;
+  --color-pin: #f5a623;
+}
+
+[data-theme="dark"] {
+  --color-bg: #1c1c1e;
+  --color-surface: #2c2c2e;
+  --color-border: #3a3a3c;
+  --color-border-light: #3a3a3c;
+  --color-text: #f2f2f7;
+  --color-text-muted: rgba(255, 255, 255, 0.5);
+  --color-danger: #ff453a;
+  --color-accent: #4a9eff;
+  --color-pin: #ffd60a;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: system-ui, -apple-system, sans-serif;
+  transition: background 0.15s, color 0.15s;
+}
+
+input, textarea, select {
+  background: var(--color-bg);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+input:focus, textarea:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+button {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+button:hover {
+  filter: brightness(0.95);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+a {
+  color: var(--color-accent);
+}
+
+/* highlight.js dark mode: swap theme when dark */
+[data-theme="dark"] .hljs {
+  background: #2c2c2e;
+  color: #f2f2f7;
+}

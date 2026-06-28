@@ -23,7 +23,7 @@ export default function Login() {
     return (
         <div>
             <h2>Login</h2>
-            {err && <div style={{ color: "crimson" }}>{err}</div>}
+            {err && <div style={{ color: "var(--color-danger)" }}>{err}</div>}
             <form onSubmit={onSubmit} style={{ display: "grid", gap: 8, maxWidth: 360 }}>
                 <input placeholder="email" value={email} onChange={(e) => setEmail(e.target.value)} />
                 <input placeholder="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
