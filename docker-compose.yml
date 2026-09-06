@@ -24,6 +24,12 @@ services:
       # days a note stays in the trash before it is purged (0 = keep forever)
       TRASH_RETENTION_DAYS: "30"
 
+      # versions kept per note (0 = keep every one)
+      MAX_NOTE_VERSIONS: "50"
+
+      # grace period before an unreferenced upload is reclaimed (0 = never)
+      IMAGE_GC_GRACE_HOURS: "168"
+
       # admin bootstrap
       ADMIN_EMAIL: "admin@example.com"
       ADMIN_PASSWORD: "supersecret123"

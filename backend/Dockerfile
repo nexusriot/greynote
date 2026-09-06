@@ -9,9 +9,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+# Stamped into the binary so a running container can say what it is.
+ARG VERSION=dev
+
 # sqlite_fts5 enables the FTS5 extension the search index needs; without it the
 # server still runs but falls back to scanning.
-RUN CGO_ENABLED=1 GOOS=linux go build -tags sqlite_fts5 -o server .
+RUN CGO_ENABLED=1 GOOS=linux go build -tags sqlite_fts5 \
+    -ldflags "-s -w -X main.version=${VERSION}" -o server .
 
 FROM alpine:3.20
 

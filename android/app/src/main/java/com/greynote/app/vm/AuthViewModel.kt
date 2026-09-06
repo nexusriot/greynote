@@ -3,6 +3,7 @@ package com.greynote.app.vm
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.greynote.app.Graph
 import com.greynote.app.api.ApiClient
 import com.greynote.app.api.model.LoginRequest
 import com.greynote.app.data.Prefs
@@ -57,6 +58,9 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
                 val res = ApiClient.api.login(LoginRequest(email.trim().lowercase(), password))
                 if (res.isSuccessful) {
                     val me = ApiClient.api.me().body()
+                    // Fill the offline cache straight away so the list is not
+                    // empty on a fresh sign-in.
+                    Graph.repository.sync()
                     _state.update {
                         it.copy(
                             loading = false,
@@ -78,6 +82,8 @@ class AuthViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             runCatching { ApiClient.api.logout() }
             ApiClient.clearSession()
+            // The cached notes belong to the account that filled them.
+            runCatching { Graph.repository.clearCache() }
             _state.update { it.copy(isAuthenticated = false, email = "", loggedOut = true) }
         }
     }

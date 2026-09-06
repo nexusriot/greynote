@@ -51,6 +51,9 @@ backend/
                          DisableShare, SetSharePassword, SetShareExpiry,
                          ExportZip, Stats, GetShared
   search.go            — FTS5 index maintenance, query building, LIKE fallback
+  folders.go           — folder path normalisation, tree, move/rename
+  templates.go         — templates, placeholder expansion, daily notes
+  images_gc.go         — reference scan + unreferenced-upload sweeper
   tags.go              — setNoteTags (join table), tag list/rename/merge/delete
   links.go             — [[wiki link]] parsing, resolution, Links handler
   trash.go             — ListTrash, RestoreNote, PurgeNote, EmptyTrash, sweeper
@@ -65,10 +68,16 @@ frontend/src/
   theme.jsx/.css       — ThemeContext: dark/light toggle; CSS custom properties
   api.js               — apiFetch: thin fetch wrapper (JSON, cookie credentials)
   wikilinks.js         — [[link]] parsing and rewriting (code-aware)
+  markdown.js          — task toggling, heading extraction, slugs
+  editor.js            — toolbar transforms, list continuation, indentation
+  diff.js              — line diff (LCS) for version history
   components/
     CommandPalette.jsx — Ctrl+K overlay: fuzzy search notes, keyboard nav
     MarkdownRenderer.jsx — ReactMarkdown with copy-code button, wiki links
     Snippet.jsx        — renders search excerpts with highlighted matches
+    EditorToolbar.jsx  — markdown toolbar buttons
+    Outline.jsx        — heading outline / jump list
+    VersionDiff.jsx    — collapsed line diff between a version and the note
   pages/
     Login.jsx          — POST /api/login
     Notes.jsx          — Note list, server-side search, tag filter, import/export
@@ -76,6 +85,8 @@ frontend/src/
                          versions, links/backlinks, conflict resolution
     NewNote.jsx        — Creates a note and opens it (unresolved-link target)
     Tags.jsx           — Tag rename / merge / remove
+    Templates.jsx      — Template CRUD and "use"
+    Daily.jsx          — Journal browser with date navigation
     Trash.jsx          — Restore, delete forever, empty trash
     ShareView.jsx      — Public share viewer (no auth required)
     Sessions.jsx       — Active sessions list with per-session revoke
@@ -140,6 +151,8 @@ Sessions are validated on every authenticated request: token looked up, expiry c
 | `tags` | TEXT NOT NULL DEFAULT '' | Denormalised cache of `note_tags` (added migration) |
 | `is_pinned` | INTEGER NOT NULL DEFAULT 0 | 1 = pinned (added migration) |
 | `deleted_at` | TEXT | RFC3339 UTC; NULL = live, non-NULL = in the trash (added migration) |
+| `folder` | TEXT NOT NULL DEFAULT '' | Path like `Work/Projects`; empty = root (added migration) |
+| `daily_date` | TEXT | `YYYY-MM-DD` when the note is a journal entry; unique per user (added migration) |
 | `created_at` | TEXT NOT NULL | RFC3339 UTC, millisecond precision |
 | `updated_at` | TEXT NOT NULL | RFC3339 UTC, millisecond precision; doubles as the note's version identifier |
 
@@ -182,6 +195,17 @@ that note appears.
 | `target_id` | INTEGER | FK → notes (SET NULL); NULL = unresolved |
 | `target_title` | TEXT NOT NULL | as written in the note; UNIQUE per source |
 | `position` | INTEGER NOT NULL | order of appearance |
+
+### `templates`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | |
+| `user_id` | INTEGER NOT NULL | FK → users (CASCADE) |
+| `name` | TEXT NOT NULL | UNIQUE per user |
+| `title` / `content` / `tags` / `folder` | TEXT NOT NULL | may contain `{{placeholders}}` |
+| `is_daily` | INTEGER NOT NULL DEFAULT 0 | at most one per user; setting it clears the others |
+| `created_at` / `updated_at` | TEXT NOT NULL | RFC3339 UTC |
 
 ### `notes_fts`
 
@@ -230,6 +254,7 @@ All routes under `/api`. Authenticated routes require a valid session cookie; un
 |---|---|---|---|
 | POST | `/api/login` | — | Email + password → set session cookie |
 | POST | `/api/logout` | — | Delete session, clear cookie |
+| GET | `/api/version` | — | `{version}` — stamped in at build time, `"dev"` for a plain `go build` |
 | GET | `/api/me` | ✓ | Returns `{userId, email, isAdmin}` |
 
 ### Account self-service
@@ -252,7 +277,7 @@ Route registration order matters: static segments (`/notes/export`, `/notes/stat
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/api/notes` | ✓ | List live notes (pinned first, then by `updated_at DESC`); `?tag=a,b` filters by tag (AND) |
+| GET | `/api/notes` | ✓ | List live notes (pinned first, then by `updated_at DESC`). `?tag=a,b` filters by tag (AND), `?folder=` by folder (`&recursive=1` includes subfolders, `?folder=` alone means the root), `?limit=`/`?offset=` page, `?full=1` includes bodies. Bodies are replaced by a `snippet` unless `full=1`; the unpaged total comes back in `X-Total-Count` |
 | POST | `/api/notes` | ✓ | Create note; returns `{id}` |
 | GET | `/api/notes/export` | ✓ | Download all notes as `notes-export.zip` (front-matter markdown) |
 | GET | `/api/notes/search` | ✓ | `?q=` ranked full-text search; `?limit=` (default 50, max 200). Returns `{results, indexed}` |
@@ -266,6 +291,9 @@ Route registration order matters: static segments (`/notes/export`, `/notes/stat
 | POST | `/api/notes/:id/restore` | ✓ | Restore a trashed note |
 | DELETE | `/api/notes/:id/purge` | ✓ | Permanently delete a trashed note |
 | GET | `/api/notes/:id/links` | ✓ | `{outgoing, backlinks}` for the note |
+| GET | `/api/notes/daily` | ✓ | `?date=YYYY-MM-DD` — the journal entry for a day, 404 if there is none |
+| POST | `/api/notes/daily` | ✓ | Open today's journal entry, creating it from the daily template if needed |
+| GET | `/api/notes/daily/list` | ✓ | Days that already have an entry, newest first |
 | POST | `/api/notes/:id/pin` | ✓ | Toggle `is_pinned` |
 | GET | `/api/notes/:id/versions` | ✓ | List versions (newest first, max 50) |
 | GET | `/api/notes/:id/versions/:vid` | ✓ | Get a specific version (full content) |
@@ -284,6 +312,24 @@ Route registration order matters: static segments (`/notes/export`, `/notes/stat
 | DELETE | `/api/tags/:name` | ✓ | Strip a tag from every note that carries it |
 
 All three mutations return `{notesUpdated}`.
+
+### Folders
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/folders` | ✓ | The folder tree with direct and nested note counts |
+| PUT | `/api/folders` | ✓ | `{from, to}` — rename or move a folder and everything under it |
+| DELETE | `/api/folders?path=` | ✓ | Remove a folder; its notes (and its subfolders' notes) move to the root |
+
+### Templates
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/templates` | ✓ | List templates |
+| POST | `/api/templates` | ✓ | Create one; a duplicate name is a 400 |
+| PUT | `/api/templates/:id` | ✓ | Update |
+| DELETE | `/api/templates/:id` | ✓ | Delete (notes made from it are untouched) |
+| POST | `/api/templates/:id/apply` | ✓ | `{title?, date?}` — create a note from the template |
 
 ### Sharing (public)
 
@@ -368,6 +414,56 @@ Filtering by tag is a server-side `EXISTS` per tag, so `?tag=work,urgent` means
 
 `is_pinned` is a single integer column. The list query orders by `is_pinned DESC, updated_at DESC`, so pinned notes always appear first without any client-side sorting.
 
+### List payloads
+
+`GET /api/notes` used to return every note's whole body, so opening the list
+downloaded the entire corpus. It now sends a `snippet` (the first 200 characters,
+flattened) and an empty `content`; `?full=1` restores the old behaviour and is
+what the Android client uses to fill its offline cache. Paging is `?limit` and
+`?offset` with the unpaged count in `X-Total-Count`, which keeps the response a
+plain array — older clients that ignore both keep working.
+
+### Folders
+
+A folder is a path string on the note row rather than a table: moving a note is
+one UPDATE, and the model matches how markdown vaults are organised.
+`normalizeFolder` collapses separators, trims each segment, drops `.`/`..` and
+caps depth and length, so a path can never escape into something surprising.
+
+The tree in `GET /api/folders` is derived from the distinct paths in use, with
+parents synthesised (`Work` exists as soon as `Work/Projects` does) and two
+counts per folder: notes directly inside it, and everything nested below.
+Renaming a folder rewrites the subtree in a single statement; deleting one moves
+its notes to the root instead of leaving half-paths behind.
+
+### Templates and the journal
+
+A template holds a title, body, tags and folder, any of which may contain
+`{{date}}`, `{{time}}`, `{{datetime}}`, `{{weekday}}`, `{{month}}`, `{{year}}` or
+`{{title}}`. Expansion takes the date from the client, because the server runs in
+UTC and "today" is a question only the user's device can answer.
+
+`notes.daily_date` marks a journal entry, with a unique index per user, so
+`POST /api/notes/daily` is get-or-create rather than create-another. Trashing a
+journal entry clears `daily_date`: the day becomes free again, and restoring the
+old note later cannot collide with the new one.
+
+### Version retention
+
+Every save still snapshots the previous state, but `pruneNoteVersions` then drops
+everything beyond `MAX_NOTE_VERSIONS` (default 50, `0` for unlimited). Without
+this a note kept a full copy of itself per save forever.
+
+### Image garbage collection
+
+`sweepOrphanImages` lists the uploads directory, scans every note, note version
+and template body for `/api/images/<file>` references, and removes the files
+nothing points at. Two rules keep it from eating live data: images referenced by
+trashed notes or by history are kept, and a file younger than
+`IMAGE_GC_GRACE_HOURS` (default 7 days) is never touched — an image is uploaded
+before the note that embeds it is saved, and a draft may reference one for a
+while. It runs at startup and every 12 hours.
+
 ### Full-text search
 
 `notes_fts` is an FTS5 table over title, content and tags. A query is split on
@@ -443,6 +539,35 @@ resolved once at the end.
 
 Export writes the matching format: YAML front matter followed by the body, so
 export → import round-trips titles, tags, pin state and timestamps.
+
+### Editing
+
+The editor stays a plain textarea over plain markdown; the additions are text
+transforms rather than a rich-text layer, and they live in `editor.js` as pure
+functions so they can be tested without a DOM:
+
+- the toolbar wraps or unwraps the selection (`**bold**`), prefixes lines
+  (headings, quotes, lists) or inserts a skeleton with the useful part selected;
+- Enter inside a list repeats the marker, increments an ordered one, starts new
+  task items unchecked, and clears the marker when the item was left empty;
+- Tab and Shift+Tab indent and outdent the selected lines.
+
+Task checkboxes in the preview are clickable. react-markdown gives the list item
+its source position but not the checkbox inside it, so the item passes its line
+number down through a context and a click rewrites exactly that line
+(`toggleTaskAtLine`) and saves immediately — a checkbox that needs a separate
+save does not feel like a checkbox.
+
+The outline reads headings straight from the markdown (skipping code fences) and
+jumps either the preview scroll position or the textarea caret.
+
+Version history renders a line diff (LCS in `diff.js`) between the chosen version
+and the note as it stands now, collapsing long unchanged runs, so "what would
+restoring this actually change?" is answerable at a glance.
+
+Math is `remark-math` + `rehype-katex`; mermaid diagrams render from
+```` ```mermaid ```` fences and the library is imported dynamically, so the 700 kB
+of mermaid only loads for a note that actually contains a diagram.
 
 ### Auto-save draft
 
@@ -563,27 +688,145 @@ Keyboard: `↑`/`↓` to move selection, `Enter` to open, `Escape` to close. Cli
 
 ---
 
+## Desktop client
+
+The Electron app (`electron/`) is a desktop front end for the same REST API.
+
+### Process split
+
+```
+renderer (sandboxed, no Node, strict CSP)
+    │  window.greynote.*  — the preload bridge
+    ▼
+main process
+    ├── ApiClient   — every HTTP call, plus the session cookie
+    ├── Store       — settings.json and notes-cache.json in userData
+    └── Menu / Tray / globalShortcut
+```
+
+Putting the network in the main process removes the two problems a desktop
+client usually has with a cookie-session API: there is no page origin to satisfy,
+and the session cookie is never reachable from page JavaScript. Bridge calls
+resolve to `{ ok, data }` or `{ ok: false, error, status }` so the UI can tell a
+`409` conflict from an unreachable server without unwrapping exceptions across
+the boundary.
+
+### Renderer
+
+No framework: a 40-line `h()` helper builds elements and a small store re-renders
+on change. The views are plain functions of state. Markdown goes through `marked`
+and is always sanitised with DOMPurify — note bodies are user content, and the
+page has no business executing anything found in one.
+
+The rules that must match the web client — `[[wiki link]]` parsing, task toggling,
+heading extraction, the version diff — are imported directly from
+`frontend/src/`, not copied, so the two clients cannot drift.
+
+### Offline
+
+`notes:list` writes the unfiltered note list to `notes-cache.json`. When the
+server cannot be reached, the app shows those notes with a retry banner instead
+of bouncing a signed-in user to a login screen; editing still requires the
+server, which is the honest boundary for a client with no local write log.
+
+### Desktop affordances
+
+Native menus and accelerators, a tray icon, a global quick-capture shortcut that
+works while the window is hidden, and native save dialogs for "save note as" and
+"export all notes". Commands from all three sources funnel into one `command`
+channel the renderer listens on.
+
+### Self-test
+
+`npm run selftest` launches the real app with `--selftest`, which drives the
+renderer through `window.__greynote_test__` against a running backend: sign in,
+create, edit, save, preview, tick a checkbox, search, provoke a `409` and resolve
+it, visit every screen, trash and purge, then clean up. It captures a screenshot
+per screen and exits non-zero on the first failed step. `GREYNOTE_OFFLINE_CHECK=1`
+runs a shorter variant that asserts the cached-notes fallback with the server
+stopped.
+
 ## Android client
 
-A native Kotlin / Jetpack Compose app (`android/`) is a thin client over the same REST API — it adds no server-side concepts of its own.
+The Android app (`android/`) is offline-first: the UI never waits on the network,
+and the network never decides whether the app is usable.
 
-- **Networking** — Retrofit over OkHttp. `ApiClient` wires a `PersistentCookieJar` backed by `SharedPreferences`, so the session cookie issued by `POST /api/login` survives process death and is replayed on every request (the same cookie-session model as the web client, no token handling in app code).
-- **Server URL** — stored in `Prefs` (`SharedPreferences`), defaulting to `http://10.0.2.2:38080` — the Android emulator's alias for the host machine's loopback. Editable on the login screen so one build can point at any deployment.
-- **Architecture** — MVVM: `vm/` ViewModels hold UI state and call `ApiService`; `ui/` Compose screens are driven by `NavGraph` (`login → notes → note-edit`). Markdown is rendered by a custom `MarkdownText` composable.
-- **Scope** — login/logout, list + search notes, create/edit/delete, and pin. Sharing, versions, images, stats, tag management, trash browsing and admin remain web-only.
-- **Concurrency** — the editor keeps the `updatedAt` it loaded and sends it as `If-Match`; a `409` opens a dialog offering "keep mine" (re-saves without the header) or "load theirs". Deleting moves the note to the trash, which only the web app can browse.
-- **Config** — `minSdk 26`, `targetSdk 34`. `usesCleartextTraffic="true"` is enabled for plain-HTTP local development; production deployments should be reached over HTTPS.
+### Layers
+
+```
+Compose screens ── ViewModels ── NotesRepository ─┬─ Room (source of truth)
+                                                  └─ Retrofit/OkHttp (sync)
+```
+
+`Graph` is a small service locator holding the repository and preferences — one
+of each, so a DI framework would be more machinery than it earns.
+
+### Local store
+
+`NoteEntity` mirrors a note plus the bookkeeping sync needs:
+
+- `updatedAt` is the server's version token (sent back as `If-Match`) and is
+  never touched by a local edit;
+- `localUpdatedAt` is when the user last changed the note here, and drives
+  ordering so an offline edit still floats to the top;
+- `dirty` marks work waiting to be pushed, `pendingDelete` a trashing that has
+  not reached the server;
+- `conflict` plus `serverTitle`/`serverContent`/`serverUpdatedAt` hold the losing
+  side of a rejected push.
+
+A note created offline gets a negative placeholder id; the first successful push
+replaces the row with one keyed on the real id.
+
+### Sync
+
+`sync()` pushes then pulls:
+
+1. **Deletes** — `DELETE /api/notes/:id` for each `pendingDelete` row. A 404 is
+   success: the note is gone either way.
+2. **Edits** — `PUT` with `If-Match: updatedAt`. `409` stores the server's copy
+   alongside the local one and flags the conflict instead of picking a winner;
+   `404` means the note was deleted elsewhere, so the local row goes.
+3. **Creates** — `POST`, then the row is re-keyed to the returned id.
+4. **Pull** — pages `GET /api/notes?full=1` and upserts, skipping any note that
+   is dirty, conflicted or pending deletion, then deletes local rows the server
+   no longer has (again skipping local work).
+
+Conflicts surface as a badge in the list and a card in the editor with both
+copies; "keep mine" re-pushes against the server's newer version token, "use
+theirs" discards the local edits.
+
+Gson happily leaves a non-null Kotlin field null when the JSON omits it, so the
+API models are mapped into entities through one function that reads every string
+defensively. An incomplete response degrades a field, it does not crash a sync.
+
+### Screens
+
+Notes list (with local search, tag and folder filters), editor (tags, folder,
+preview, image upload, conflict resolution), history and sharing, trash, tags and
+folders, templates, journal, statistics and settings. Anything that acts on
+server-side state — trash retention, tag renames across every note, share links,
+statistics — calls the API directly and says plainly when it needs a connection.
+
+### Beyond the app window
+
+- **Share sheet**: an `ACTION_SEND` `text/plain` intent becomes a new note, with
+  the subject (a browser sends the page title) as its first line.
+- **Widget**: a RemoteViews home-screen widget with "new note" and "today's
+  journal"; two buttons do not justify a second Compose runtime in the APK.
+- **App lock**: an optional biometric-or-device-credential gate on launch, which
+  degrades to no lock when the device has no screen lock configured rather than
+  locking the user out of their own notes.
 
 ## Testing
 
 `backend/*_test.go` drives the real router (`buildRouter`) against a temporary
 SQLite file, with a helper that creates a user and a session cookie, so tests
-exercise middleware, routing and SQL exactly as production does. Coverage
-focuses on the behaviour that is easy to get wrong: search indexing across every
-write path and the LIKE fallback, the trash lifecycle and retention sweep, tag
-rename/merge/delete rewrites, link resolution as notes are created, renamed,
-trashed and restored, the conflict matrix, and import parsing plus the
-export→import round trip.
+exercise middleware, routing and SQL exactly as production does — 91 tests
+covering search indexing across every write path and the LIKE fallback, the
+trash lifecycle and retention sweep, version pruning, image garbage collection,
+tag rename/merge/delete, folder trees and moves, templates and the one-per-day
+journal rule, link resolution, the conflict matrix, list paging, and import
+parsing plus the export→import round trip.
 
 ```bash
 cd backend && make test     # go test -tags sqlite_fts5 ./...
@@ -591,12 +834,93 @@ cd backend && make test     # go test -tags sqlite_fts5 ./...
 
 Run `go test ./...` without the tag to exercise the no-FTS5 fallback path.
 
-The frontend's pure helpers (`wikilinks.js`, `Snippet.jsx`) are covered by
-Vitest:
+The frontend's pure logic — wiki links, search-snippet rendering, task toggling,
+heading extraction, the toolbar transforms and the version diff — is covered by
+52 Vitest tests:
 
 ```bash
 cd frontend && npm test
 ```
+
+The desktop client's API layer is tested against a real HTTP server (cookie
+capture and replay, `If-Match`, the 409 body, query building, the plain-language
+network errors), alongside its settings/cache store and the pure renderer logic —
+38 Vitest tests. Its UI is covered by the driven self-test rather than a
+simulated DOM:
+
+```bash
+cd electron && npm test && npm run selftest
+```
+
+The Android sync engine is the part most able to lose data, so it is tested
+against a real in-memory Room database and a real HTTP stack (MockWebServer):
+offline creation, push with `If-Match`, conflict capture and both resolutions,
+trashing local-only versus synced notes, pull deleting only what is safe to
+delete, and a failed sync preserving pending work. 24 tests in total, with DAO
+query coverage (search, tag, folder, ordering) and share-intent parsing.
+
+```bash
+make test-android          # or: cd android && JAVA_HOME=… ./gradlew :app:testDebugUnitTest
+```
+
+Everything above runs from the root with `make test`; `make e2e` adds the
+hermetic Docker run described below.
+
+The Android client has also been exercised end to end on a physical tablet
+(Android 16), with the device pointed at a host backend through
+`adb reverse tcp:38080 tcp:38099`: sign-in, create on device, pull from server,
+offline edit and offline create followed by upload on reconnect, a real 409
+conflict resolved with "keep mine", trash and restore, the share sheet, both
+widget shortcuts (cold and warm start), templates, tag rename, statistics,
+settings and share-link creation.
+
+## Building and packaging
+
+`make` at the root is the only entry point anyone needs; `scripts/` holds the
+implementations so each step is also runnable on its own, and CI needs no
+knowledge beyond the target names.
+
+The scripts share `scripts/common.sh`, which carries the two pieces of local
+knowledge that otherwise bite:
+
+- **JDK discovery** — this kind of machine often has no `java` on `PATH`, but does
+  have Android Studio's bundled JBR.
+- **Gradle discovery** — the wrapper jar is deliberately not committed, so the
+  scripts fall back to a cached distribution. They pick the *lowest* cached
+  stable release that satisfies `gradle-wrapper.properties` rather than the
+  newest: reaching for the newest lands on a milestone build the Android plugin
+  refuses.
+
+Both `.deb` packages are assembled by hand with `dpkg-deb` under `fakeroot`,
+which keeps the build free of a packaging framework:
+
+- `greynote-server` — binary, systemd unit (hardened: `ProtectSystem=strict`, a
+  dedicated user, only `/var/lib/greynote` writable), and a conffile. Purging
+  leaves the database in place and says so.
+- `greynote-desktop` — the Electron runtime plus the app in `resources/app`, a
+  launcher, a desktop entry and a generated icon. `chrome-sandbox` is packaged
+  `4755 root:root`, without which Electron refuses to start on a kernel that
+  disallows unprivileged user namespaces.
+
+## End-to-end testing
+
+`make e2e` (`scripts/e2e.sh`) runs the backend suite hermetically:
+
+```
+docker compose -f e2e/docker-compose.yml
+    backend  ← built from backend/Dockerfile, /data on tmpfs, healthchecked
+    tests    ← golang:1.22-alpine running e2e/ against http://backend:8080
+```
+
+Nothing is installed on the host, no port is published, the database starts
+empty every run, and the stack is torn down with its volumes whether the suite
+passes or fails (`KEEP_STACK=1` keeps it up for poking at). On failure the script
+prints the server's log before exiting non-zero.
+
+The suite talks to the API and nothing else — no database access, no fixtures
+written behind the server's back — so it tests the same surface a client uses,
+against the same image that would be deployed. It also asserts that the image was
+built with FTS5, which a plain `go build` would silently drop.
 
 ## Security considerations
 

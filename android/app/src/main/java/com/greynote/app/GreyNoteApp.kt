@@ -9,5 +9,6 @@ class GreyNoteApp : Application() {
         super.onCreate()
         ApiClient.init(this)
         ApiClient.setBaseUrl(Prefs(this).serverUrl)
+        Graph.init(this)
     }
 }

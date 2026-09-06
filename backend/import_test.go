@@ -239,11 +239,13 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if notes[0].Title != "Round trip" {
 		t.Errorf("title = %q", notes[0].Title)
 	}
-	if notes[0].Content != "the body: with a colon" {
-		t.Errorf("content = %q", notes[0].Content)
-	}
 	if notes[0].Tags != "work,ideas" {
 		t.Errorf("tags = %q", notes[0].Tags)
+	}
+
+	// The list omits bodies, so read the note itself to check the content.
+	if got := env.getNote(bob, notes[0].ID).Content; got != "the body: with a colon" {
+		t.Errorf("content = %q", got)
 	}
 }
 

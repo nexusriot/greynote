@@ -12,6 +12,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// version is stamped in at build time by scripts/build-backend.sh
+// (-X main.version). A plain `go build` leaves it as "dev".
+var version = "dev"
+
 type Config struct {
 	Addr           string
 	SQLitePath     string
@@ -21,10 +25,12 @@ type Config struct {
 	CookieName   string
 	CookieSecure bool
 
-	SessionTTL     time.Duration
-	TrashRetention time.Duration
-	AdminEmail     string
-	AdminPassword  string
+	SessionTTL      time.Duration
+	TrashRetention  time.Duration
+	MaxNoteVersions int
+	ImageGCGrace    time.Duration
+	AdminEmail      string
+	AdminPassword   string
 }
 
 func getenv(key, def string) string {
@@ -55,17 +61,32 @@ func mustLoadConfig() Config {
 		trashDays = 30
 	}
 
+	// 0 keeps every version of a note.
+	maxVersions, err := strconv.Atoi(getenv("MAX_NOTE_VERSIONS", "50"))
+	if err != nil || maxVersions < 0 {
+		maxVersions = 50
+	}
+
+	// How long an unreferenced upload survives before the sweeper reclaims it.
+	// Generous by default: an image is uploaded before the note is saved.
+	imageGraceHours, err := strconv.Atoi(getenv("IMAGE_GC_GRACE_HOURS", "168"))
+	if err != nil || imageGraceHours < 0 {
+		imageGraceHours = 168
+	}
+
 	return Config{
-		Addr:           addr,
-		SQLitePath:     sqlitePath,
-		FrontendOrigin: frontendOrigin,
-		ImagesDir:      imagesDir,
-		CookieName:     cookieName,
-		CookieSecure:   cookieSecure,
-		SessionTTL:     time.Duration(ttlHours) * time.Hour,
-		TrashRetention: time.Duration(trashDays) * 24 * time.Hour,
-		AdminEmail:     getenv("ADMIN_EMAIL", ""),
-		AdminPassword:  getenv("ADMIN_PASSWORD", ""),
+		Addr:            addr,
+		SQLitePath:      sqlitePath,
+		FrontendOrigin:  frontendOrigin,
+		ImagesDir:       imagesDir,
+		CookieName:      cookieName,
+		CookieSecure:    cookieSecure,
+		SessionTTL:      time.Duration(ttlHours) * time.Hour,
+		TrashRetention:  time.Duration(trashDays) * 24 * time.Hour,
+		MaxNoteVersions: maxVersions,
+		ImageGCGrace:    time.Duration(imageGraceHours) * time.Hour,
+		AdminEmail:      getenv("ADMIN_EMAIL", ""),
+		AdminPassword:   getenv("ADMIN_PASSWORD", ""),
 	}
 }
 
@@ -91,10 +112,11 @@ func main() {
 		log.Printf("FTS5 unavailable — search falls back to scanning (rebuild with -tags sqlite_fts5)")
 	}
 	startTrashSweeper(db, cfg.TrashRetention)
+	startImageSweeper(db, cfg.ImagesDir, cfg.ImageGCGrace)
 
 	r := buildRouter(db, cfg)
 
-	log.Printf("Backend listening on %s (sqlite=%s, images=%s)", cfg.Addr, cfg.SQLitePath, cfg.ImagesDir)
+	log.Printf("GreyNote %s listening on %s (sqlite=%s, images=%s)", version, cfg.Addr, cfg.SQLitePath, cfg.ImagesDir)
 	log.Fatal(r.Run(cfg.Addr))
 }
 
@@ -110,9 +132,10 @@ func buildRouter(db *sql.DB, cfg Config) *gin.Engine {
 	r.Use(CORSMiddleware(cfg.FrontendOrigin))
 
 	r.GET("/health", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+	r.GET("/api/version", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"version": version}) })
 
 	auth := NewAuthHandlers(db, cfg)
-	notes := NewNotesHandlers(db, cfg.TrashRetention)
+	notes := NewNotesHandlers(db, cfg.TrashRetention, cfg.MaxNoteVersions)
 	tags := NewTagsHandlers(db)
 	images := NewImagesHandlers(cfg.ImagesDir)
 
@@ -147,6 +170,9 @@ func buildRouter(db *sql.DB, cfg Config) *gin.Engine {
 			pr.GET("/notes/export", notes.ExportZip)
 			pr.GET("/notes/stats", notes.Stats)
 			pr.GET("/notes/search", notes.Search)
+			pr.GET("/notes/daily", notes.GetDailyNote)
+			pr.POST("/notes/daily", notes.OpenDailyNote)
+			pr.GET("/notes/daily/list", notes.ListDailyNotes)
 			pr.GET("/notes/trash", notes.ListTrash)
 			pr.DELETE("/notes/trash", notes.EmptyTrash)
 			pr.POST("/notes/import", notes.Import)
@@ -169,6 +195,16 @@ func buildRouter(db *sql.DB, cfg Config) *gin.Engine {
 
 			// images upload (serving is public above)
 			pr.POST("/images", images.Upload)
+
+			pr.GET("/folders", notes.ListFolders)
+			pr.PUT("/folders", notes.RenameFolder)
+			pr.DELETE("/folders", notes.DeleteFolder)
+
+			pr.GET("/templates", notes.ListTemplates)
+			pr.POST("/templates", notes.CreateTemplate)
+			pr.PUT("/templates/:id", notes.UpdateTemplate)
+			pr.DELETE("/templates/:id", notes.DeleteTemplate)
+			pr.POST("/templates/:id/apply", notes.ApplyTemplate)
 
 			pr.GET("/tags", tags.List)
 			pr.PUT("/tags/:name", tags.Rename)

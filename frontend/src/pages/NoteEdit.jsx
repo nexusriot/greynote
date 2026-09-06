@@ -1,8 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import MarkdownRenderer from "../components/MarkdownRenderer";
+import EditorToolbar from "../components/EditorToolbar";
+import Outline from "../components/Outline";
+import VersionDiff from "../components/VersionDiff";
 import { apiFetch } from "../api";
 import { wikiLinkIndex } from "../wikilinks";
+import { taskStats, toggleTaskAtLine } from "../markdown";
+import { applyToolbarAction, continueList, indentSelection } from "../editor";
 
 // ── Tags pill input ────────────────────────────────────────────────────────────
 function TagsInput({ value, onChange }) {
@@ -57,9 +62,10 @@ function TagsInput({ value, onChange }) {
 }
 
 // ── Version history panel ──────────────────────────────────────────────────────
-function VersionHistory({ noteId, onRestore }) {
+function VersionHistory({ noteId, currentContent, onRestore }) {
     const [versions, setVersions] = useState([]);
     const [selected, setSelected] = useState(null);
+    const [mode, setMode] = useState("diff");
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
@@ -93,14 +99,31 @@ function VersionHistory({ noteId, onRestore }) {
                         <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>{fmtDate(v.savedAt)}</span>
                     </button>
                     {selected?.id === v.id && (
-                        <div style={{ borderTop: "1px solid var(--color-border)", padding: 10 }}>
-                            <div style={{ fontSize: 12, color: "var(--color-text-muted)", marginBottom: 6 }}>
-                                Preview — click Restore to apply
+                        <div style={{ borderTop: "1px solid var(--color-border)", padding: 10, display: "grid", gap: 8 }}>
+                            <div style={{ display: "flex", gap: 6 }}>
+                                <button
+                                    onClick={() => setMode("diff")}
+                                    style={{ fontSize: 11, padding: "2px 8px", fontWeight: mode === "diff" ? 700 : 400 }}
+                                >
+                                    Changes
+                                </button>
+                                <button
+                                    onClick={() => setMode("preview")}
+                                    style={{ fontSize: 11, padding: "2px 8px", fontWeight: mode === "preview" ? 700 : 400 }}
+                                >
+                                    Preview
+                                </button>
                             </div>
-                            <div style={{ maxHeight: 240, overflowY: "auto", padding: 8, background: "var(--color-surface)", borderRadius: 4, fontSize: 13 }}>
-                                <MarkdownRenderer>{selected.content}</MarkdownRenderer>
-                            </div>
-                            <button onClick={() => onRestore(selected)} style={{ marginTop: 8, color: "var(--color-accent)", fontWeight: 600 }}>
+
+                            {mode === "diff" ? (
+                                <VersionDiff oldText={selected.content} newText={currentContent} />
+                            ) : (
+                                <div style={{ maxHeight: 240, overflowY: "auto", padding: 8, background: "var(--color-surface)", borderRadius: 4, fontSize: 13 }}>
+                                    <MarkdownRenderer>{selected.content}</MarkdownRenderer>
+                                </div>
+                            )}
+
+                            <button onClick={() => onRestore(selected)} style={{ color: "var(--color-accent)", fontWeight: 600, justifySelf: "start" }}>
                                 Restore this version
                             </button>
                         </div>
@@ -234,6 +257,8 @@ export default function NoteEdit() {
     const [uploading, setUploading] = useState(false);
     const [conflict, setConflict] = useState(null);
     const [links, setLinks] = useState({ outgoing: [], backlinks: [] });
+    const [folders, setFolders] = useState([]);
+    const [showOutline, setShowOutline] = useState(false);
 
     const markdownRef = useRef(null);
     const textareaRef = useRef(null);
@@ -253,6 +278,8 @@ export default function NoteEdit() {
         if (!note?.content) return 0;
         return note.content.trim().split(/\s+/).filter(Boolean).length;
     }, [note?.content]);
+
+    const tasks = useMemo(() => taskStats(note?.content || ""), [note?.content]);
 
     // ── Load ────────────────────────────────────────────────────────────────────
     async function load() {
@@ -286,6 +313,14 @@ export default function NoteEdit() {
         }
     }
 
+    const loadFolders = useCallback(async () => {
+        try {
+            setFolders(await apiFetch("/api/folders"));
+        } catch {
+            setFolders([]);
+        }
+    }, []);
+
     const loadLinks = useCallback(async () => {
         try {
             setLinks(await apiFetch(`/api/notes/${id}/links`));
@@ -297,14 +332,20 @@ export default function NoteEdit() {
     // ── Save ────────────────────────────────────────────────────────────────────
     // force skips the If-Match check, which is how "overwrite theirs" resolves a
     // conflict.
-    const save = useCallback(async ({ force = false } = {}) => {
-        if (!note) return;
+    const saveNote = useCallback(async (target, { force = false } = {}) => {
+        if (!target) return;
         setErr("");
         try {
             const res = await apiFetch(`/api/notes/${id}`, {
                 method: "PUT",
-                headers: !force && note.updatedAt ? { "If-Match": note.updatedAt } : undefined,
-                body: { title: note.title, content: note.content, tags: note.tags || "", isPinned: note.isPinned || false },
+                headers: !force && target.updatedAt ? { "If-Match": target.updatedAt } : undefined,
+                body: {
+                    title: target.title,
+                    content: target.content,
+                    tags: target.tags || "",
+                    folder: target.folder || "",
+                    isPinned: target.isPinned || false,
+                },
             });
             setNote(n => ({ ...n, updatedAt: res?.updatedAt || n.updatedAt }));
             setSaved(true);
@@ -318,7 +359,12 @@ export default function NoteEdit() {
             }
             setErr(e.message);
         }
-    }, [note, id, loadLinks]);
+    }, [id, loadLinks]);
+
+    const save = useCallback(
+        (options) => saveNote(note, options),
+        [saveNote, note],
+    );
 
     function loadServerVersion() {
         if (!conflict) { setConflict(null); return; }
@@ -414,6 +460,87 @@ export default function NoteEdit() {
         } finally {
             setUploading(false);
         }
+    }
+
+    // applyToTextarea runs a pure transform from editor.js against the live
+    // selection and puts the caret back where the transform asked for.
+    function applyToTextarea(transform) {
+        const ta = textareaRef.current;
+        if (!ta) return;
+
+        const next = transform(note.content || "", ta.selectionStart, ta.selectionEnd);
+        setNote(n => ({ ...n, content: next.text }));
+        setSaved(false);
+        requestAnimationFrame(() => {
+            ta.focus();
+            ta.setSelectionRange(next.start, next.end);
+        });
+    }
+
+    function onToolbarAction(action) {
+        applyToTextarea((text, start, end) => applyToolbarAction(action, text, start, end));
+    }
+
+    function onEditorKeyDown(e) {
+        const ta = textareaRef.current;
+        if (!ta) return;
+
+        if (e.key === "Enter" && !e.shiftKey && ta.selectionStart === ta.selectionEnd) {
+            const next = continueList(note.content || "", ta.selectionStart);
+            if (next) {
+                e.preventDefault();
+                setNote(n => ({ ...n, content: next.text }));
+                setSaved(false);
+                requestAnimationFrame(() => {
+                    ta.focus();
+                    ta.setSelectionRange(next.caret, next.caret);
+                });
+            }
+            return;
+        }
+
+        if (e.key === "Tab") {
+            e.preventDefault();
+            applyToTextarea((text, start, end) => indentSelection(text, start, end, e.shiftKey));
+            return;
+        }
+
+        const shortcuts = { b: "bold", i: "italic", k: "link" };
+        const action = (e.ctrlKey || e.metaKey) && shortcuts[e.key.toLowerCase()];
+        if (action) {
+            e.preventDefault();
+            e.stopPropagation(); // Ctrl+K belongs to the editor while typing, not the palette
+            onToolbarAction(action);
+        }
+    }
+
+    // Toggling a checkbox in the preview edits the markdown and saves straight
+    // away — a checkbox that needs a separate save does not feel like a checkbox.
+    function onToggleTask(line) {
+        if (!note) return;
+        const content = toggleTaskAtLine(note.content || "", line);
+        if (content === note.content) return;
+
+        const next = { ...note, content };
+        setNote(next);
+        setSaved(false);
+        saveNote(next);
+    }
+
+    function jumpToHeading(heading) {
+        if (preview) {
+            const el = markdownRef.current?.querySelector(`[id="${CSS.escape(heading.slug)}"]`);
+            el?.scrollIntoView({ behavior: "smooth", block: "start" });
+            return;
+        }
+
+        const ta = textareaRef.current;
+        if (!ta) return;
+        const lines = (note.content || "").split("\n");
+        const offset = lines.slice(0, heading.line - 1).reduce((n, line) => n + line.length + 1, 0);
+        ta.focus();
+        ta.setSelectionRange(offset, offset + (lines[heading.line - 1] || "").length);
+        ta.scrollTop = ((heading.line - 1) / Math.max(lines.length, 1)) * ta.scrollHeight;
     }
 
     function insertAtCursor(text) {
@@ -522,7 +649,8 @@ export default function NoteEdit() {
         setLinks({ outgoing: [], backlinks: [] });
         load();
         loadLinks();
-    }, [id, loadLinks]);
+        loadFolders();
+    }, [id, loadLinks, loadFolders]);
 
     if (err && !note) return <div style={{ color: "var(--color-danger)" }}>{err}</div>;
     if (!note) return <div>Loading...</div>;
@@ -597,22 +725,48 @@ export default function NoteEdit() {
             {/* Tags */}
             <TagsInput value={note.tags || ""} onChange={tags => { setNote(n => ({ ...n, tags })); setSaved(false); }} />
 
-            {/* Preview toggle + word count */}
+            {/* Folder */}
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <button onClick={() => setPreview(p => !p)}>{preview ? "Edit" : "Preview"}</button>
-                {!preview && (
-                    <span style={{ color: "var(--color-text-muted)", fontSize: 12 }}>
-                        {wordCount} {wordCount === 1 ? "word" : "words"} · Ctrl+S save · Ctrl+E preview · paste image to embed
-                    </span>
-                )}
+                <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>📁</span>
+                <input
+                    list="note-folders"
+                    placeholder="Folder (optional, e.g. Work/Projects)"
+                    value={note.folder || ""}
+                    onChange={e => { setNote(n => ({ ...n, folder: e.target.value })); setSaved(false); }}
+                    style={{ padding: 6, flex: 1, fontSize: 13 }}
+                />
+                <datalist id="note-folders">
+                    {folders.map(f => <option key={f.path} value={f.path} />)}
+                </datalist>
             </div>
+
+            {/* Preview toggle + word count */}
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <button onClick={() => setPreview(p => !p)}>{preview ? "Edit" : "Preview"}</button>
+                <button onClick={() => setShowOutline(o => !o)} style={{ fontSize: 12 }}>
+                    {showOutline ? "Hide outline" : "Outline"}
+                </button>
+                <span style={{ color: "var(--color-text-muted)", fontSize: 12 }}>
+                    {wordCount} {wordCount === 1 ? "word" : "words"}
+                    {tasks.total > 0 && ` · ${tasks.done}/${tasks.total} tasks`}
+                    {!preview && " · Ctrl+S save · Ctrl+E preview · Tab indent"}
+                </span>
+            </div>
+
+            {showOutline && (
+                <div style={{ padding: 10, border: "1px solid var(--color-border)", borderRadius: 8 }}>
+                    <Outline content={note.content} onJump={jumpToHeading} />
+                </div>
+            )}
+
+            {!preview && <EditorToolbar onAction={onToolbarAction} />}
 
             {/* Preview div always rendered so exportHtml can grab innerHTML */}
             <div
                 ref={markdownRef}
                 style={{ padding: 12, border: "1px solid var(--color-border)", borderRadius: 8, display: preview ? "block" : "none", minHeight: 80 }}
             >
-                <MarkdownRenderer wikiHref={wikiHref}>{note.content}</MarkdownRenderer>
+                <MarkdownRenderer wikiHref={wikiHref} onToggleTask={onToggleTask}>{note.content}</MarkdownRenderer>
             </div>
 
             {!preview && (
@@ -620,6 +774,7 @@ export default function NoteEdit() {
                     ref={textareaRef}
                     value={note.content}
                     onChange={e => { setNote(n => ({ ...n, content: e.target.value })); setSaved(false); }}
+                    onKeyDown={onEditorKeyDown}
                     onPaste={onPaste}
                     rows={16}
                     style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", padding: 8 }}
@@ -695,7 +850,9 @@ export default function NoteEdit() {
                         {showVersions ? "Hide" : "Show"}
                     </button>
                 </div>
-                {showVersions && <VersionHistory noteId={id} onRestore={restoreVersion} />}
+                {showVersions && (
+                    <VersionHistory noteId={id} currentContent={note.content} onRestore={restoreVersion} />
+                )}
             </div>
         </div>
     );

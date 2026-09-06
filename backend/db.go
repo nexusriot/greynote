@@ -84,6 +84,20 @@ func migrate(db *sql.DB) error {
 			FOREIGN KEY(note_id) REFERENCES notes(id) ON DELETE CASCADE,
 			FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE
 		);`,
+		`CREATE TABLE IF NOT EXISTS templates (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL DEFAULT '',
+			tags TEXT NOT NULL DEFAULT '',
+			folder TEXT NOT NULL DEFAULT '',
+			is_daily INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			UNIQUE(user_id, name),
+			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+		);`,
 		`CREATE TABLE IF NOT EXISTS note_links (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			source_id INTEGER NOT NULL,
@@ -108,6 +122,8 @@ func migrate(db *sql.DB) error {
 		{"notes", "tags", "TEXT NOT NULL DEFAULT ''"},
 		{"notes", "is_pinned", "INTEGER NOT NULL DEFAULT 0"},
 		{"notes", "deleted_at", "TEXT"},
+		{"notes", "folder", "TEXT NOT NULL DEFAULT ''"},
+		{"notes", "daily_date", "TEXT"},
 		{"share_links", "password_hash", "TEXT"},
 		{"share_links", "expires_at", "TEXT"},
 	} {
@@ -125,6 +141,8 @@ func migrate(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_note_links_target ON note_links(target_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_note_links_title ON note_links(target_title)`,
+		`CREATE INDEX IF NOT EXISTS idx_notes_folder ON notes(user_id, folder)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_daily ON notes(user_id, daily_date) WHERE daily_date IS NOT NULL`,
 	}
 	for _, s := range indexes {
 		if _, err := db.Exec(s); err != nil {

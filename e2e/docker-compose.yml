@@ -1,0 +1,56 @@
+# Hermetic end-to-end run: the released server image, a throwaway data volume and
+# a test runner, all on a private network. Nothing on the host is touched and no
+# port is published.
+name: greynote-e2e
+
+services:
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      args:
+        # scripts/e2e.sh exports this from the VERSION file.
+        VERSION: "${VERSION:-dev}"
+    environment:
+      ADDR: ":8080"
+      SQLITE_PATH: "/data/notes.db"
+      FRONTEND_ORIGIN: "http://localhost:5173"
+      COOKIE_NAME: "notes_session"
+      COOKIE_SECURE: "0"
+      SESSION_TTL_HOURS: "168"
+      TRASH_RETENTION_DAYS: "30"
+      MAX_NOTE_VERSIONS: "50"
+      IMAGE_GC_GRACE_HOURS: "168"
+      ADMIN_EMAIL: "admin@example.com"
+      ADMIN_PASSWORD: "supersecret123"
+    tmpfs:
+      # A fresh database per run, gone when the container stops.
+      - /data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  tests:
+    image: golang:1.22-alpine
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      GREYNOTE_URL: "http://backend:8080"
+      GREYNOTE_EMAIL: "admin@example.com"
+      GREYNOTE_PASSWORD: "supersecret123"
+      GREYNOTE_EXPECT_VERSION: "${VERSION:-}"
+      GOFLAGS: "-mod=mod"
+      GOPROXY: "off"
+      CGO_ENABLED: "0"
+    volumes:
+      - ./:/e2e:ro
+      - go-build-cache:/root/.cache/go-build
+    working_dir: /e2e
+    command: ["go", "test", "-v", "-count=1", "-timeout", "10m", "./..."]
+
+volumes:
+  go-build-cache:

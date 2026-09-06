@@ -2,11 +2,10 @@ package com.greynote.app.vm
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.google.gson.Gson
+import com.greynote.app.Graph
 import com.greynote.app.api.ApiClient
-import com.greynote.app.api.model.ConflictResponse
-import com.greynote.app.api.model.Note
-import com.greynote.app.api.model.NoteUpsertRequest
+import com.greynote.app.data.NotesRepository
+import com.greynote.app.data.db.NoteEntity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -18,145 +17,150 @@ data class NoteEditState(
     val title: String = "",
     val content: String = "",
     val tags: String = "",
+    val folder: String = "",
     val isPinned: Boolean = false,
     val loading: Boolean = true,
     val saving: Boolean = false,
-    val deleting: Boolean = false,
-    val saved: Boolean = false,
+    val saved: Boolean = true,
     val deleted: Boolean = false,
     val error: String? = null,
     val previewMode: Boolean = false,
-    // baseUpdatedAt is the version this editor loaded; it is sent back as
-    // If-Match so a save cannot silently overwrite another device's newer one.
-    val baseUpdatedAt: String? = null,
-    val conflict: Note? = null,
+    val uploading: Boolean = false,
+    /** Set when the server rejected a push because it holds a newer copy. */
+    val conflictTitle: String? = null,
+    val conflictContent: String? = null,
+    val pendingUpload: Boolean = false,
 )
 
-class NoteEditViewModel : ViewModel() {
+/**
+ * The editor works entirely against the local store: a save is instant and
+ * offline-safe, and the repository pushes it when the network allows.
+ */
+class NoteEditViewModel(
+    private val repo: NotesRepository = Graph.repository,
+) : ViewModel() {
+
     private val _state = MutableStateFlow(NoteEditState())
     val state: StateFlow<NoteEditState> = _state.asStateFlow()
 
+    private var loadedId: Long = 0
+
     fun load(id: Long) {
-        if (_state.value.id == id && !_state.value.loading) return
+        if (loadedId == id) return
+        loadedId = id
+
         viewModelScope.launch {
-            _state.update { it.copy(loading = true, id = id, error = null) }
-            try {
-                val res = ApiClient.api.getNote(id)
-                if (res.isSuccessful) {
-                    val n = res.body()!!
-                    _state.update {
-                        it.copy(
-                            loading = false,
-                            id = n.id,
-                            title = n.title,
-                            content = n.content,
-                            tags = n.tags,
-                            isPinned = n.isPinned,
-                            saved = true,
-                            baseUpdatedAt = n.updatedAt,
-                            conflict = null,
-                        )
-                    }
-                } else {
-                    _state.update { it.copy(loading = false, error = "Failed to load note (${res.code()})") }
-                }
-            } catch (e: Exception) {
-                _state.update { it.copy(loading = false, error = e.message ?: "Network error") }
+            val note = repo.find(id)
+            if (note == null) {
+                _state.update { it.copy(loading = false, error = "Note not found on this device") }
+                return@launch
             }
+            apply(note)
+            // Fetch the freshest copy when possible, but never clobber unsaved work.
+            if (!note.dirty && !note.isLocalOnly) {
+                runCatching { ApiClient.api.getNote(id) }.getOrNull()?.let { res ->
+                    val body = res.body()
+                    if (res.isSuccessful && body != null && !_state.value.saving && _state.value.saved) {
+                        repo.sync()
+                        repo.find(id)?.let { apply(it) }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun apply(note: NoteEntity) {
+        _state.update {
+            it.copy(
+                id = note.id,
+                title = note.title,
+                content = note.content,
+                tags = note.tags,
+                folder = note.folder,
+                isPinned = note.isPinned,
+                loading = false,
+                saved = !note.dirty,
+                pendingUpload = note.dirty,
+                conflictTitle = if (note.conflict) note.serverTitle else null,
+                conflictContent = if (note.conflict) note.serverContent else null,
+            )
         }
     }
 
     fun setTitle(v: String) = _state.update { it.copy(title = v, saved = false) }
     fun setContent(v: String) = _state.update { it.copy(content = v, saved = false) }
     fun setTags(v: String) = _state.update { it.copy(tags = v, saved = false) }
+    fun setFolder(v: String) = _state.update { it.copy(folder = v, saved = false) }
     fun togglePreview() = _state.update { it.copy(previewMode = !it.previewMode) }
     fun clearError() = _state.update { it.copy(error = null) }
-    fun dismissConflict() = _state.update { it.copy(conflict = null) }
 
-    // keepServerVersion discards the local edits in favour of the copy another
-    // device saved.
-    fun keepServerVersion() {
-        val theirs = _state.value.conflict ?: return
-        _state.update {
-            it.copy(
-                title = theirs.title,
-                content = theirs.content,
-                tags = theirs.tags,
-                isPinned = theirs.isPinned,
-                baseUpdatedAt = theirs.updatedAt,
-                conflict = null,
-                saved = true,
-            )
-        }
-    }
-
-    // force skips the version check, which is how the user resolves a conflict in
-    // favour of their own copy.
-    fun save(force: Boolean = false) {
+    fun save(thenSync: Boolean = true) {
+        val s = _state.value
         viewModelScope.launch {
-            val s = _state.value
             _state.update { it.copy(saving = true, error = null) }
-            try {
-                val res = ApiClient.api.updateNote(
-                    s.id,
-                    NoteUpsertRequest(s.title, s.content, s.tags, s.isPinned),
-                    if (force) null else s.baseUpdatedAt,
-                )
-                when {
-                    res.isSuccessful -> _state.update {
-                        it.copy(
-                            saving = false,
-                            saved = true,
-                            conflict = null,
-                            baseUpdatedAt = res.body()?.updatedAt ?: it.baseUpdatedAt,
-                        )
-                    }
-                    res.code() == 409 -> {
-                        val theirs = parseConflict(res.errorBody()?.string())
-                        _state.update {
-                            it.copy(
-                                saving = false,
-                                conflict = theirs,
-                                error = if (theirs == null) "This note changed on another device" else null,
-                            )
-                        }
-                    }
-                    else -> _state.update { it.copy(saving = false, error = "Save failed (${res.code()})") }
-                }
-            } catch (e: Exception) {
-                _state.update { it.copy(saving = false, error = e.message ?: "Network error") }
+            repo.save(s.id, s.title, s.content, s.tags, s.folder)
+            _state.update { it.copy(saving = false, saved = true, pendingUpload = true) }
+            if (thenSync) {
+                repo.sync()
+                repo.find(s.id)?.let { apply(it) }
             }
         }
     }
 
-    private fun parseConflict(body: String?): Note? =
-        body?.let { runCatching { Gson().fromJson(it, ConflictResponse::class.java).current }.getOrNull() }
-
     fun togglePin() {
+        val s = _state.value
         viewModelScope.launch {
-            val id = _state.value.id
-            try {
-                val res = ApiClient.api.togglePin(id)
-                if (res.isSuccessful) {
-                    _state.update { it.copy(isPinned = res.body()?.isPinned ?: !it.isPinned) }
-                }
-            } catch (_: Exception) {}
+            repo.setPinned(s.id, !s.isPinned)
+            _state.update { it.copy(isPinned = !s.isPinned) }
+            repo.sync()
         }
     }
 
     fun delete(onSuccess: () -> Unit) {
+        val id = _state.value.id
         viewModelScope.launch {
-            _state.update { it.copy(deleting = true) }
+            repo.trash(id)
+            _state.update { it.copy(deleted = true) }
+            onSuccess()
+            repo.sync()
+        }
+    }
+
+    fun keepMine() {
+        val id = _state.value.id
+        viewModelScope.launch {
+            repo.resolveKeepMine(id)
+            repo.sync()
+            repo.find(id)?.let { apply(it) }
+        }
+    }
+
+    fun keepTheirs() {
+        val id = _state.value.id
+        viewModelScope.launch {
+            repo.resolveKeepServer(id)
+            repo.find(id)?.let { apply(it) }
+        }
+    }
+
+    /** Uploads an image and appends the markdown that embeds it. */
+    fun attachImage(part: okhttp3.MultipartBody.Part) {
+        viewModelScope.launch {
+            _state.update { it.copy(uploading = true, error = null) }
             try {
-                val res = ApiClient.api.deleteNote(_state.value.id)
-                if (res.isSuccessful) {
-                    _state.update { it.copy(deleted = true) }
-                    onSuccess()
+                val res = ApiClient.api.uploadImage(part)
+                val url = res.body()?.url
+                if (res.isSuccessful && url != null) {
+                    val separator = if (_state.value.content.isBlank()) "" else "\n\n"
+                    _state.update { it.copy(content = it.content + separator + "![](" + url + ")", saved = false) }
+                    save()
                 } else {
-                    _state.update { it.copy(deleting = false, error = "Delete failed (${res.code()})") }
+                    _state.update { it.copy(error = "Upload failed (${res.code()})") }
                 }
             } catch (e: Exception) {
-                _state.update { it.copy(deleting = false, error = e.message ?: "Network error") }
+                _state.update { it.copy(error = e.message ?: "Upload needs a connection") }
+            } finally {
+                _state.update { it.copy(uploading = false) }
             }
         }
     }

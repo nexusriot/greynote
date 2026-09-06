@@ -12,6 +12,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import io.noties.markwon.Markwon
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 import io.noties.markwon.ext.tables.TablePlugin
+import io.noties.markwon.ext.tasklist.TaskListPlugin
 import io.noties.markwon.linkify.LinkifyPlugin
 
 @Composable
@@ -22,6 +23,7 @@ fun MarkdownText(text: String, modifier: Modifier = Modifier) {
         Markwon.builder(context)
             .usePlugin(StrikethroughPlugin.create())
             .usePlugin(TablePlugin.create(context))
+            .usePlugin(TaskListPlugin.create(context))
             .usePlugin(LinkifyPlugin.create())
             .build()
     }

@@ -37,20 +37,33 @@ type testEnv struct {
 
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
-	return newTestEnvWithRetention(t, 30*24*time.Hour)
+	return newTestEnvWithConfig(t, func(cfg *Config) {})
 }
 
 func newTestEnvWithRetention(t *testing.T, retention time.Duration) *testEnv {
 	t.Helper()
+	return newTestEnvWithConfig(t, func(cfg *Config) { cfg.TrashRetention = retention })
+}
+
+func newTestEnvWithVersions(t *testing.T, maxVersions int) *testEnv {
+	t.Helper()
+	return newTestEnvWithConfig(t, func(cfg *Config) { cfg.MaxNoteVersions = maxVersions })
+}
+
+func newTestEnvWithConfig(t *testing.T, customise func(*Config)) *testEnv {
+	t.Helper()
 
 	dir := t.TempDir()
 	cfg := Config{
-		SQLitePath:     filepath.Join(dir, "test.db"),
-		ImagesDir:      filepath.Join(dir, "images"),
-		CookieName:     "notes_session",
-		SessionTTL:     time.Hour,
-		TrashRetention: retention,
+		SQLitePath:      filepath.Join(dir, "test.db"),
+		ImagesDir:       filepath.Join(dir, "images"),
+		CookieName:      "notes_session",
+		SessionTTL:      time.Hour,
+		TrashRetention:  30 * 24 * time.Hour,
+		MaxNoteVersions: 50,
+		ImageGCGrace:    7 * 24 * time.Hour,
 	}
+	customise(&cfg)
 	if err := os.MkdirAll(cfg.ImagesDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -66,6 +79,20 @@ func newTestEnvWithRetention(t *testing.T, retention time.Duration) *testEnv {
 	}
 
 	return &testEnv{t: t, DB: db, Router: buildRouter(db, cfg), Cfg: cfg}
+}
+
+// request runs a call and hands back the raw recorder, for tests that care
+// about headers rather than the body.
+func (e *testEnv) request(method, path string, body any, cookie *http.Cookie) *httptest.ResponseRecorder {
+	e.t.Helper()
+
+	req := httptest.NewRequest(method, path, nil)
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	e.Router.ServeHTTP(rec, req)
+	return rec
 }
 
 // user creates an account and returns its id together with a session cookie.

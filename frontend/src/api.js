@@ -7,7 +7,19 @@ export class ApiError extends Error {
     }
 }
 
-export async function apiFetch(path, { method = "GET", body, headers } = {}) {
+// apiFetchWithMeta is apiFetch plus the response headers, for the few calls
+// that need them (the note list reports its total in X-Total-Count).
+export async function apiFetchWithMeta(path, options = {}) {
+    const res = await rawFetch(path, options);
+    return { data: await parseResponse(res), headers: res.headers };
+}
+
+export async function apiFetch(path, options = {}) {
+    const res = await rawFetch(path, options);
+    return parseResponse(res);
+}
+
+async function rawFetch(path, { method = "GET", body, headers } = {}) {
     const res = await fetch(path, {
         method,
         headers: {
@@ -17,7 +29,10 @@ export async function apiFetch(path, { method = "GET", body, headers } = {}) {
         body: body ? JSON.stringify(body) : undefined,
         credentials: "include", // IMPORTANT: cookie sessions
     });
+    return res;
+}
 
+async function parseResponse(res) {
     const ct = res.headers.get("content-type") || "";
     const isJson = ct.includes("application/json");
     const payload = isJson ? await res.json().catch(() => null) : null;

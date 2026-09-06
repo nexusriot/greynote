@@ -10,3 +10,8 @@ data class MeResponse(
     val email: String,
     val isAdmin: Boolean,
 )
+
+data class ChangePasswordRequest(
+    val currentPassword: String,
+    val newPassword: String,
+)

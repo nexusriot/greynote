@@ -19,10 +19,12 @@ type NotesHandlers struct {
 	// TrashRetention is how long a soft-deleted note is kept before the sweeper
 	// removes it. Zero disables automatic purging.
 	TrashRetention time.Duration
+	// MaxVersions caps how many history entries a note keeps. Zero keeps all.
+	MaxVersions int
 }
 
-func NewNotesHandlers(db *sql.DB, trashRetention time.Duration) *NotesHandlers {
-	return &NotesHandlers{DB: db, TrashRetention: trashRetention}
+func NewNotesHandlers(db *sql.DB, trashRetention time.Duration, maxVersions int) *NotesHandlers {
+	return &NotesHandlers{DB: db, TrashRetention: trashRetention, MaxVersions: maxVersions}
 }
 
 // GET /api/notes/search?q=&limit= — ranked full-text search over live notes
@@ -39,10 +41,15 @@ func (h *NotesHandlers) Search(c *gin.Context) {
 }
 
 type noteDTO struct {
-	ID               int64  `json:"id"`
-	Title            string `json:"title"`
-	Content          string `json:"content"`
+	ID      int64  `json:"id"`
+	Title   string `json:"title"`
+	Content string `json:"content"`
+	// Snippet stands in for Content in list responses, which would otherwise
+	// ship every note's full body on every page load.
+	Snippet          string `json:"snippet,omitempty"`
 	Tags             string `json:"tags"`
+	Folder           string `json:"folder"`
+	DailyDate        string `json:"dailyDate,omitempty"`
 	IsPinned         bool   `json:"isPinned"`
 	CreatedAt        string `json:"createdAt"`
 	UpdatedAt        string `json:"updatedAt"`
@@ -55,6 +62,7 @@ type noteUpsertReq struct {
 	Title    string `json:"title"`
 	Content  string `json:"content"`
 	Tags     string `json:"tags"`
+	Folder   string `json:"folder"`
 	IsPinned bool   `json:"isPinned"`
 	// BaseUpdatedAt is the note version the client loaded; an alternative to the
 	// If-Match header for clients that cannot set headers easily.
@@ -69,20 +77,56 @@ type noteVersionDTO struct {
 	SavedAt string `json:"savedAt"`
 }
 
-func (h *NotesHandlers) List(c *gin.Context) {
-	userID := getUserID(c)
-
-	query := `SELECT n.id, n.title, n.content, n.tags, n.is_pinned, n.created_at, n.updated_at
-		 FROM notes n WHERE n.user_id = ? AND n.deleted_at IS NULL`
+// listFilters builds the WHERE clause shared by the note list and its count.
+func listFilters(c *gin.Context, userID int64) (string, []any) {
+	where := ` FROM notes n WHERE n.user_id = ? AND n.deleted_at IS NULL`
 	args := []any{userID}
 
 	for _, tag := range normalizeTags(c.Query("tag")) {
-		query += ` AND EXISTS (
+		where += ` AND EXISTS (
 			SELECT 1 FROM note_tags nt JOIN tags t ON t.id = nt.tag_id
 			WHERE nt.note_id = n.id AND t.user_id = n.user_id AND t.name = ?)`
 		args = append(args, tag)
 	}
-	query += ` ORDER BY n.is_pinned DESC, n.updated_at DESC`
+
+	if folder, ok := c.GetQuery("folder"); ok {
+		folder = normalizeFolder(folder)
+		if folder == "" {
+			where += ` AND n.folder = ''`
+		} else if c.Query("recursive") == "1" {
+			// Include everything nested under the folder.
+			where += ` AND (n.folder = ? OR n.folder LIKE ?)`
+			args = append(args, folder, folder+"/%")
+		} else {
+			where += ` AND n.folder = ?`
+			args = append(args, folder)
+		}
+	}
+	return where, args
+}
+
+// GET /api/notes?tag=&folder=&limit=&offset=&full=1
+//
+// The response is a plain array of notes; the total row count comes back in the
+// X-Total-Count header so paging does not change the response shape.
+func (h *NotesHandlers) List(c *gin.Context) {
+	userID := getUserID(c)
+	where, args := listFilters(c, userID)
+
+	var total int
+	if err := h.DB.QueryRow(`SELECT COUNT(*)`+where, args...).Scan(&total); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+
+	query := `SELECT n.id, n.title, n.content, n.tags, n.folder, n.daily_date, n.is_pinned, n.created_at, n.updated_at` +
+		where + ` ORDER BY n.is_pinned DESC, n.updated_at DESC`
+
+	limit, offset := paginationParams(c)
+	if limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	}
 
 	rows, err := h.DB.Query(query, args...)
 	if err != nil {
@@ -91,19 +135,44 @@ func (h *NotesHandlers) List(c *gin.Context) {
 	}
 	defer rows.Close()
 
+	full := c.Query("full") == "1"
 	out := []noteDTO{}
 	for rows.Next() {
 		var n noteDTO
 		var isPinned int
-		if err := rows.Scan(&n.ID, &n.Title, &n.Content, &n.Tags, &isPinned, &n.CreatedAt, &n.UpdatedAt); err != nil {
+		var dailyDate sql.NullString
+		if err := rows.Scan(&n.ID, &n.Title, &n.Content, &n.Tags, &n.Folder, &dailyDate, &isPinned, &n.CreatedAt, &n.UpdatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 			return
 		}
 		n.IsPinned = isPinned == 1
+		n.DailyDate = dailyDate.String
+		n.Snippet = snippetOf(n.Content, 200)
+		if !full {
+			n.Content = ""
+		}
 		out = append(out, n)
 	}
 
+	c.Header("X-Total-Count", strconv.Itoa(total))
 	c.JSON(http.StatusOK, out)
+}
+
+// paginationParams reads ?limit and ?offset. A missing or zero limit means "no
+// limit", which keeps older clients working.
+func paginationParams(c *gin.Context) (limit, offset int) {
+	limit, _ = strconv.Atoi(c.Query("limit"))
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	offset, _ = strconv.Atoi(c.Query("offset"))
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
 }
 
 func (h *NotesHandlers) Create(c *gin.Context) {
@@ -115,49 +184,52 @@ func (h *NotesHandlers) Create(c *gin.Context) {
 		return
 	}
 
-	isPinned := 0
-	if req.IsPinned {
-		isPinned = 1
-	}
-	now := nowRFC3339()
-	res, err := h.DB.Exec(
-		`INSERT INTO notes(user_id, title, content, tags, is_pinned, created_at, updated_at) VALUES(?,?,?,?,?,?,?)`,
-		userID, req.Title, req.Content, req.Tags, isPinned, now, now,
-	)
+	id, err := h.createNote(userID, req, "")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
+	c.JSON(http.StatusCreated, gin.H{"id": id})
+}
+
+// createNote inserts a note and brings the derived state (tags, links, search
+// index) with it. dailyDate marks the note as a journal entry when non-empty.
+func (h *NotesHandlers) createNote(userID int64, req noteUpsertReq, dailyDate string) (int64, error) {
+	var daily any
+	if dailyDate != "" {
+		daily = dailyDate
+	}
+
+	now := nowRFC3339()
+	res, err := h.DB.Exec(
+		`INSERT INTO notes(user_id, title, content, tags, folder, daily_date, is_pinned, created_at, updated_at)
+		 VALUES(?,?,?,?,?,?,?,?,?)`,
+		userID, req.Title, req.Content, req.Tags, normalizeFolder(req.Folder), daily,
+		boolToInt(req.IsPinned), now, now,
+	)
+	if err != nil {
+		return 0, err
+	}
 	id, _ := res.LastInsertId()
 
 	if _, err := setNoteTags(h.DB, userID, id, req.Tags); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
+		return 0, err
 	}
 	if err := indexNoteGraph(h.DB, userID, id, req.Content); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
-		return
+		return 0, err
 	}
-
-	c.JSON(http.StatusCreated, gin.H{"id": id})
+	return id, nil
 }
 
 func (h *NotesHandlers) Get(c *gin.Context) {
 	userID := getUserID(c)
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
-	var n noteDTO
-	var isPinned int
-	err := h.DB.QueryRow(
-		`SELECT id, title, content, tags, is_pinned, created_at, updated_at
-		 FROM notes WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
-		id, userID,
-	).Scan(&n.ID, &n.Title, &n.Content, &n.Tags, &isPinned, &n.CreatedAt, &n.UpdatedAt)
+	n, err := h.loadNote(userID, id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-	n.IsPinned = isPinned == 1
 
 	var token string
 	var enabled int
@@ -214,6 +286,10 @@ func (h *NotesHandlers) Update(c *gin.Context) {
 		`INSERT INTO note_versions(note_id, title, content, tags, saved_at) VALUES(?,?,?,?,?)`,
 		id, oldTitle, oldContent, oldTags, oldUpdatedAt,
 	)
+	if err := pruneNoteVersions(h.DB, id, h.MaxVersions); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
 
 	isPinned := 0
 	if req.IsPinned {
@@ -221,8 +297,9 @@ func (h *NotesHandlers) Update(c *gin.Context) {
 	}
 	updatedAt := nextVersionStamp(oldUpdatedAt)
 	res, err := h.DB.Exec(
-		`UPDATE notes SET title=?, content=?, tags=?, is_pinned=?, updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`,
-		req.Title, req.Content, req.Tags, isPinned, updatedAt, id, userID,
+		`UPDATE notes SET title=?, content=?, tags=?, folder=?, is_pinned=?, updated_at=?
+		 WHERE id=? AND user_id=? AND deleted_at IS NULL`,
+		req.Title, req.Content, req.Tags, normalizeFolder(req.Folder), isPinned, updatedAt, id, userID,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -243,6 +320,21 @@ func (h *NotesHandlers) Update(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"updatedAt": updatedAt})
+}
+
+// pruneNoteVersions drops the oldest history entries beyond the cap. Without it
+// every save keeps a full copy of the note forever.
+func pruneNoteVersions(ex execer, noteID int64, max int) error {
+	if max <= 0 {
+		return nil
+	}
+	_, err := ex.Exec(`
+		DELETE FROM note_versions
+		WHERE note_id = ? AND id NOT IN (
+			SELECT id FROM note_versions WHERE note_id = ?
+			ORDER BY saved_at DESC, id DESC LIMIT ?
+		)`, noteID, noteID, max)
+	return err
 }
 
 // clientBaseVersion reads the note version the client believes it is editing,
@@ -267,18 +359,20 @@ func indexNoteGraph(ex execer, userID, noteID int64, content string) error {
 	return reindexNote(ex, noteID)
 }
 
-// loadNote reads one live note plus its share metadata.
+// loadNote reads one live note.
 func (h *NotesHandlers) loadNote(userID, id int64) (*noteDTO, error) {
 	var n noteDTO
 	var isPinned int
+	var dailyDate sql.NullString
 	err := h.DB.QueryRow(
-		`SELECT id, title, content, tags, is_pinned, created_at, updated_at
+		`SELECT id, title, content, tags, folder, daily_date, is_pinned, created_at, updated_at
 		 FROM notes WHERE id = ? AND user_id = ? AND deleted_at IS NULL`, id, userID,
-	).Scan(&n.ID, &n.Title, &n.Content, &n.Tags, &isPinned, &n.CreatedAt, &n.UpdatedAt)
+	).Scan(&n.ID, &n.Title, &n.Content, &n.Tags, &n.Folder, &dailyDate, &isPinned, &n.CreatedAt, &n.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	n.IsPinned = isPinned == 1
+	n.DailyDate = dailyDate.String
 	return &n, nil
 }
 
@@ -286,8 +380,10 @@ func (h *NotesHandlers) Delete(c *gin.Context) {
 	userID := getUserID(c)
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
+	// daily_date is cleared so the day is free again: a trashed journal entry
+	// must not block (or be resurrected by) opening that day anew.
 	res, err := h.DB.Exec(
-		`UPDATE notes SET deleted_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`,
+		`UPDATE notes SET deleted_at=?, daily_date=NULL WHERE id=? AND user_id=? AND deleted_at IS NULL`,
 		nowRFC3339(), id, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -324,6 +420,14 @@ func (h *NotesHandlers) TogglePin(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"isPinned": next == 1})
 }
 
+// versionListLimit bounds a version listing even when history is uncapped.
+func versionListLimit(maxVersions int) int {
+	if maxVersions > 0 {
+		return maxVersions
+	}
+	return 200
+}
+
 // GET /api/notes/:id/versions
 func (h *NotesHandlers) ListVersions(c *gin.Context) {
 	userID := getUserID(c)
@@ -336,8 +440,8 @@ func (h *NotesHandlers) ListVersions(c *gin.Context) {
 	}
 
 	rows, err := h.DB.Query(
-		`SELECT id, title, saved_at FROM note_versions WHERE note_id=? ORDER BY saved_at DESC LIMIT 50`,
-		id,
+		`SELECT id, title, saved_at FROM note_versions WHERE note_id=? ORDER BY saved_at DESC, id DESC LIMIT ?`,
+		id, versionListLimit(h.MaxVersions),
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})

@@ -1,6 +1,8 @@
 package com.greynote.app.api
 
 import com.greynote.app.api.model.*
+import okhttp3.MultipartBody
+import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.*
 
@@ -14,8 +16,19 @@ interface ApiService {
     @GET("api/me")
     suspend fun me(): Response<MeResponse>
 
+    @PUT("api/account/password")
+    suspend fun changePassword(@Body req: ChangePasswordRequest): Response<Unit>
+
+    // ---- notes -------------------------------------------------------------
+
     @GET("api/notes")
-    suspend fun listNotes(): Response<List<Note>>
+    suspend fun listNotes(
+        @Query("full") full: Int? = null,
+        @Query("limit") limit: Int? = null,
+        @Query("offset") offset: Int? = null,
+        @Query("tag") tag: String? = null,
+        @Query("folder") folder: String? = null,
+    ): Response<List<Note>>
 
     @POST("api/notes")
     suspend fun createNote(@Body req: NoteUpsertRequest): Response<CreateNoteResponse>
@@ -37,4 +50,97 @@ interface ApiService {
 
     @POST("api/notes/{id}/pin")
     suspend fun togglePin(@Path("id") id: Long): Response<PinResponse>
+
+    @GET("api/notes/search")
+    suspend fun search(@Query("q") query: String, @Query("limit") limit: Int = 50): Response<SearchResponse>
+
+    @GET("api/notes/{id}/links")
+    suspend fun links(@Path("id") id: Long): Response<LinksResponse>
+
+    @GET("api/notes/{id}/versions")
+    suspend fun versions(@Path("id") id: Long): Response<List<NoteVersionSummary>>
+
+    @GET("api/notes/{id}/versions/{vid}")
+    suspend fun version(@Path("id") id: Long, @Path("vid") versionId: Long): Response<NoteVersion>
+
+    @GET("api/notes/stats")
+    suspend fun stats(): Response<StatsResponse>
+
+    // ---- trash -------------------------------------------------------------
+
+    @GET("api/notes/trash")
+    suspend fun trash(): Response<List<TrashedNote>>
+
+    @POST("api/notes/{id}/restore")
+    suspend fun restoreNote(@Path("id") id: Long): Response<Unit>
+
+    @DELETE("api/notes/{id}/purge")
+    suspend fun purgeNote(@Path("id") id: Long): Response<Unit>
+
+    @DELETE("api/notes/trash")
+    suspend fun emptyTrash(): Response<PurgeResponse>
+
+    // ---- journal and templates --------------------------------------------
+
+    @POST("api/notes/daily")
+    suspend fun openDaily(@Body req: DailyRequest): Response<DailyResponse>
+
+    @GET("api/notes/daily/list")
+    suspend fun dailyEntries(): Response<List<DailyEntry>>
+
+    @GET("api/templates")
+    suspend fun templates(): Response<List<Template>>
+
+    @POST("api/templates")
+    suspend fun createTemplate(@Body req: Template): Response<CreateNoteResponse>
+
+    @PUT("api/templates/{id}")
+    suspend fun updateTemplate(@Path("id") id: Long, @Body req: Template): Response<Unit>
+
+    @DELETE("api/templates/{id}")
+    suspend fun deleteTemplate(@Path("id") id: Long): Response<Unit>
+
+    @POST("api/templates/{id}/apply")
+    suspend fun applyTemplate(@Path("id") id: Long, @Body req: ApplyTemplateRequest): Response<CreateNoteResponse>
+
+    // ---- tags and folders --------------------------------------------------
+
+    @GET("api/tags")
+    suspend fun tags(): Response<List<TagCount>>
+
+    @PUT("api/tags/{name}")
+    suspend fun renameTag(@Path("name", encoded = true) name: String, @Body req: RenameRequest): Response<TagMutationResponse>
+
+    @POST("api/tags/merge")
+    suspend fun mergeTags(@Body req: MergeTagsRequest): Response<TagMutationResponse>
+
+    @DELETE("api/tags/{name}")
+    suspend fun deleteTag(@Path("name", encoded = true) name: String): Response<TagMutationResponse>
+
+    @GET("api/folders")
+    suspend fun folders(): Response<List<Folder>>
+
+    @PUT("api/folders")
+    suspend fun renameFolder(@Body req: MoveFolderRequest): Response<FolderMutationResponse>
+
+    @DELETE("api/folders")
+    suspend fun deleteFolder(@Query("path") path: String): Response<FolderMutationResponse>
+
+    // ---- sharing and images ------------------------------------------------
+
+    @POST("api/notes/{id}/share")
+    suspend fun enableShare(@Path("id") id: Long, @Body req: ShareRequest): Response<ShareResponse>
+
+    @POST("api/notes/{id}/share/disable")
+    suspend fun disableShare(@Path("id") id: Long): Response<Unit>
+
+    @PUT("api/notes/{id}/share/password")
+    suspend fun setSharePassword(@Path("id") id: Long, @Body req: SharePasswordRequest): Response<Unit>
+
+    @Multipart
+    @POST("api/images")
+    suspend fun uploadImage(@Part file: MultipartBody.Part): Response<ImageUploadResponse>
+
+    @GET("api/notes/export")
+    suspend fun exportAll(): Response<ResponseBody>
 }

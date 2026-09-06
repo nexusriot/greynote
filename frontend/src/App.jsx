@@ -14,6 +14,8 @@ import Stats from "./pages/Stats";
 import Trash from "./pages/Trash";
 import Tags from "./pages/Tags";
 import NewNote from "./pages/NewNote";
+import Templates from "./pages/Templates";
+import Daily from "./pages/Daily";
 
 function Shell({ children }) {
     const { me, loading, logout } = useAuth();
@@ -53,6 +55,12 @@ function Shell({ children }) {
 
                 {!loading && me && (
                     <>
+                        <Link to="/daily" style={{ textDecoration: "none", color: "var(--color-text-muted)", fontSize: 14 }}>
+                            Journal
+                        </Link>
+                        <Link to="/templates" style={{ textDecoration: "none", color: "var(--color-text-muted)", fontSize: 14 }}>
+                            Templates
+                        </Link>
                         <Link to="/tags" style={{ textDecoration: "none", color: "var(--color-text-muted)", fontSize: 14 }}>
                             Tags
                         </Link>
@@ -122,6 +130,8 @@ export default function App() {
                             <Route path="/tags" element={<RequireAuth><Tags /></RequireAuth>} />
                             <Route path="/trash" element={<RequireAuth><Trash /></RequireAuth>} />
                             <Route path="/new" element={<RequireAuth><NewNote /></RequireAuth>} />
+                            <Route path="/templates" element={<RequireAuth><Templates /></RequireAuth>} />
+                            <Route path="/daily" element={<RequireAuth><Daily /></RequireAuth>} />
                             <Route path="/" element={<RequireAuth><Notes /></RequireAuth>} />
                             <Route path="/notes/:id" element={<RequireAuth><NoteEdit /></RequireAuth>} />
                             <Route path="/share/:token" element={<ShareView />} />
