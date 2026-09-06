@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"log"
 	"net/http"
 	"os"
@@ -20,9 +21,10 @@ type Config struct {
 	CookieName   string
 	CookieSecure bool
 
-	SessionTTL    time.Duration
-	AdminEmail    string
-	AdminPassword string
+	SessionTTL     time.Duration
+	TrashRetention time.Duration
+	AdminEmail     string
+	AdminPassword  string
 }
 
 func getenv(key, def string) string {
@@ -47,6 +49,12 @@ func mustLoadConfig() Config {
 		ttlHours = 168
 	}
 
+	// 0 keeps trashed notes forever; negative values fall back to the default.
+	trashDays, err := strconv.Atoi(getenv("TRASH_RETENTION_DAYS", "30"))
+	if err != nil || trashDays < 0 {
+		trashDays = 30
+	}
+
 	return Config{
 		Addr:           addr,
 		SQLitePath:     sqlitePath,
@@ -55,6 +63,7 @@ func mustLoadConfig() Config {
 		CookieName:     cookieName,
 		CookieSecure:   cookieSecure,
 		SessionTTL:     time.Duration(ttlHours) * time.Hour,
+		TrashRetention: time.Duration(trashDays) * 24 * time.Hour,
 		AdminEmail:     getenv("ADMIN_EMAIL", ""),
 		AdminPassword:  getenv("ADMIN_PASSWORD", ""),
 	}
@@ -75,15 +84,36 @@ func main() {
 	if err := ensureAdminUser(db, cfg.AdminEmail, cfg.AdminPassword); err != nil {
 		log.Fatal(err)
 	}
+	if err := initSearch(db); err != nil {
+		log.Fatal(err)
+	}
+	if !ftsEnabled {
+		log.Printf("FTS5 unavailable — search falls back to scanning (rebuild with -tags sqlite_fts5)")
+	}
+	startTrashSweeper(db, cfg.TrashRetention)
 
+	r := buildRouter(db, cfg)
+
+	log.Printf("Backend listening on %s (sqlite=%s, images=%s)", cfg.Addr, cfg.SQLitePath, cfg.ImagesDir)
+	log.Fatal(r.Run(cfg.Addr))
+}
+
+// buildRouter wires every route. Kept separate from main so tests can drive the
+// real router against a temporary database.
+func buildRouter(db *sql.DB, cfg Config) *gin.Engine {
 	r := gin.New()
+	// Route on the raw path so a percent-encoded slash stays inside one path
+	// segment; tag names may contain "/" (nested-tag convention).
+	r.UseRawPath = true
+	r.UnescapePathValues = true
 	r.Use(gin.Logger(), gin.Recovery())
 	r.Use(CORSMiddleware(cfg.FrontendOrigin))
 
 	r.GET("/health", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 
 	auth := NewAuthHandlers(db, cfg)
-	notes := NewNotesHandlers(db)
+	notes := NewNotesHandlers(db, cfg.TrashRetention)
+	tags := NewTagsHandlers(db)
 	images := NewImagesHandlers(cfg.ImagesDir)
 
 	api := r.Group("/api")
@@ -116,6 +146,10 @@ func main() {
 			// notes — static segments must be registered before :id wildcard
 			pr.GET("/notes/export", notes.ExportZip)
 			pr.GET("/notes/stats", notes.Stats)
+			pr.GET("/notes/search", notes.Search)
+			pr.GET("/notes/trash", notes.ListTrash)
+			pr.DELETE("/notes/trash", notes.EmptyTrash)
+			pr.POST("/notes/import", notes.Import)
 			pr.GET("/notes", notes.List)
 			pr.POST("/notes", notes.Create)
 			pr.GET("/notes/:id", notes.Get)
@@ -123,6 +157,9 @@ func main() {
 			pr.DELETE("/notes/:id", notes.Delete)
 
 			pr.POST("/notes/:id/pin", notes.TogglePin)
+			pr.POST("/notes/:id/restore", notes.RestoreNote)
+			pr.DELETE("/notes/:id/purge", notes.PurgeNote)
+			pr.GET("/notes/:id/links", notes.Links)
 			pr.GET("/notes/:id/versions", notes.ListVersions)
 			pr.GET("/notes/:id/versions/:vid", notes.GetVersion)
 			pr.POST("/notes/:id/share", notes.CreateOrEnableShare)
@@ -133,11 +170,15 @@ func main() {
 			// images upload (serving is public above)
 			pr.POST("/images", images.Upload)
 
+			pr.GET("/tags", tags.List)
+			pr.PUT("/tags/:name", tags.Rename)
+			pr.POST("/tags/merge", tags.Merge)
+			pr.DELETE("/tags/:name", tags.Delete)
+
 			pr.GET("/sessions", auth.ListSessions)
 			pr.DELETE("/sessions/:id", auth.RevokeSession)
 		}
 	}
 
-	log.Printf("Backend listening on %s (sqlite=%s, images=%s)", cfg.Addr, cfg.SQLitePath, cfg.ImagesDir)
-	log.Fatal(r.Run(cfg.Addr))
+	return r
 }

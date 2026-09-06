@@ -23,8 +23,14 @@ interface ApiService {
     @GET("api/notes/{id}")
     suspend fun getNote(@Path("id") id: Long): Response<Note>
 
+    // If-Match carries the note version the client loaded, so the server can
+    // reject a save that would overwrite a newer one from another device.
     @PUT("api/notes/{id}")
-    suspend fun updateNote(@Path("id") id: Long, @Body req: NoteUpsertRequest): Response<Unit>
+    suspend fun updateNote(
+        @Path("id") id: Long,
+        @Body req: NoteUpsertRequest,
+        @Header("If-Match") ifMatch: String? = null,
+    ): Response<UpdateNoteResponse>
 
     @DELETE("api/notes/{id}")
     suspend fun deleteNote(@Path("id") id: Long): Response<Unit>

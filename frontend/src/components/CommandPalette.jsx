@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetch } from "../api";
+import Snippet from "./Snippet";
 
 export default function CommandPalette({ onClose }) {
     const nav = useNavigate();
     const [query, setQuery] = useState("");
     const [notes, setNotes] = useState([]);
+    const [hits, setHits] = useState(null); // server search results, null when idle
     const [loading, setLoading] = useState(true);
     const [index, setIndex] = useState(0);
     const inputRef = useRef(null);
@@ -22,12 +24,25 @@ export default function CommandPalette({ onClose }) {
         })();
     }, []);
 
-    const results = query.trim()
-        ? notes.filter(n => {
-            const q = query.toLowerCase();
-            return n.title.toLowerCase().includes(q) || n.content.toLowerCase().includes(q);
-        })
-        : notes;
+    // An empty query lists recent notes; anything else goes through the ranked
+    // server-side search so the palette and the notes list agree.
+    useEffect(() => {
+        const q = query.trim();
+        if (!q) { setHits(null); return; }
+
+        let cancelled = false;
+        const timer = setTimeout(async () => {
+            try {
+                const res = await apiFetch(`/api/notes/search?q=${encodeURIComponent(q)}&limit=30`);
+                if (!cancelled) setHits(res.results);
+            } catch {
+                if (!cancelled) setHits([]);
+            }
+        }, 150);
+        return () => { cancelled = true; clearTimeout(timer); };
+    }, [query]);
+
+    const results = hits ?? notes;
 
     useEffect(() => { setIndex(0); }, [query]);
 
@@ -125,9 +140,11 @@ export default function CommandPalette({ onClose }) {
                                     ))}
                                 </div>
                             )}
-                            {note.content && query && note.content.toLowerCase().includes(query.toLowerCase()) && (
+                            {(note.snippet || note.content) && (
                                 <div style={{ fontSize: 12, color: "var(--color-text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                    {highlight(note.content.slice(0, 120), query)}
+                                    {note.snippet
+                                        ? <Snippet text={note.snippet} />
+                                        : note.content.slice(0, 120)}
                                 </div>
                             )}
                         </div>

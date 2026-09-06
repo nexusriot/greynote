@@ -22,4 +22,9 @@ data class NoteUpsertRequest(
 
 data class CreateNoteResponse(val id: Long)
 
+data class UpdateNoteResponse(val updatedAt: String)
+
+// ConflictResponse is the body of a 409 from PUT /api/notes/{id}.
+data class ConflictResponse(val error: String? = null, val current: Note? = null)
+
 data class PinResponse(val isPinned: Boolean)

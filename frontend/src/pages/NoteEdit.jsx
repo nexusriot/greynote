@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, Link } from "react-router-dom";
 import MarkdownRenderer from "../components/MarkdownRenderer";
 import { apiFetch } from "../api";
+import { wikiLinkIndex } from "../wikilinks";
 
 // ── Tags pill input ────────────────────────────────────────────────────────────
 function TagsInput({ value, onChange }) {
@@ -128,6 +129,94 @@ function SharePasswordInput({ hasPassword, onSave, onCancel }) {
     );
 }
 
+function LinksPanel({ links }) {
+    const unresolved = links.outgoing.filter(l => l.id === null);
+
+    if (links.backlinks.length === 0 && links.outgoing.length === 0) {
+        return (
+            <div style={{ fontSize: 13, color: "var(--color-text-muted)" }}>
+                No links yet — write <code>[[Another note]]</code> to link one.
+            </div>
+        );
+    }
+
+    return (
+        <div style={{ display: "grid", gap: 10 }}>
+            {links.backlinks.length > 0 && (
+                <div style={{ display: "grid", gap: 6 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: 1 }}>
+                        Linked from
+                    </div>
+                    {links.backlinks.map(b => (
+                        <Link
+                            key={b.id}
+                            to={`/notes/${b.id}`}
+                            style={{ textDecoration: "none", color: "inherit", border: "1px solid var(--color-border)", borderRadius: 6, padding: "6px 10px" }}
+                        >
+                            <div style={{ fontWeight: 600, fontSize: 13 }}>{b.title || "(untitled)"}</div>
+                            <div style={{ fontSize: 12, opacity: 0.65, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                {b.snippet}
+                            </div>
+                        </Link>
+                    ))}
+                </div>
+            )}
+
+            {links.outgoing.length > 0 && (
+                <div style={{ display: "grid", gap: 4 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: 1 }}>
+                        Links to
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {links.outgoing.map(l => l.id !== null ? (
+                            <Link key={l.title} to={`/notes/${l.id}`} style={{ fontSize: 13 }}>{l.title}</Link>
+                        ) : (
+                            <Link
+                                key={l.title}
+                                to={`/new?title=${encodeURIComponent(l.title)}`}
+                                title="This note does not exist yet — click to create it"
+                                style={{ fontSize: 13, color: "var(--color-text-muted)", textDecoration: "underline dotted" }}
+                            >
+                                {l.title}
+                            </Link>
+                        ))}
+                    </div>
+                    {unresolved.length > 0 && (
+                        <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                            {unresolved.length === 1
+                                ? "1 link points at a note that does not exist yet."
+                                : `${unresolved.length} links point at notes that do not exist yet.`}
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function ConflictBanner({ current, onKeepMine, onUseTheirs }) {
+    return (
+        <div style={{ padding: 12, border: "1px solid var(--color-danger)", borderRadius: 8, display: "grid", gap: 8 }}>
+            <div style={{ fontWeight: 700, color: "var(--color-danger)" }}>
+                This note changed somewhere else
+            </div>
+            <div style={{ fontSize: 13 }}>
+                Another device saved it at {current ? new Date(current.updatedAt).toLocaleString() : "an unknown time"}.
+                Saving now would overwrite that version.
+            </div>
+            {current && (
+                <div style={{ maxHeight: 160, overflowY: "auto", padding: 8, background: "var(--color-surface)", borderRadius: 4, fontSize: 12, whiteSpace: "pre-wrap" }}>
+                    {current.content || "(empty)"}
+                </div>
+            )}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button onClick={onKeepMine} style={{ fontWeight: 600 }}>Overwrite with my version</button>
+                <button onClick={onUseTheirs}>Discard mine, load theirs</button>
+            </div>
+        </div>
+    );
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 export default function NoteEdit() {
     const { id } = useParams();
@@ -143,12 +232,22 @@ export default function NoteEdit() {
     const [showVersions, setShowVersions] = useState(false);
     const [showPasswordInput, setShowPasswordInput] = useState(false);
     const [uploading, setUploading] = useState(false);
+    const [conflict, setConflict] = useState(null);
+    const [links, setLinks] = useState({ outgoing: [], backlinks: [] });
 
     const markdownRef = useRef(null);
     const textareaRef = useRef(null);
     const fileInputRef = useRef(null);
 
     const fullShareLink = useMemo(() => shareUrl ? window.location.origin + shareUrl : "", [shareUrl]);
+
+    const wikiHref = useMemo(() => {
+        const index = wikiLinkIndex(links.outgoing);
+        return title => {
+            const id = index.get(title.toLowerCase());
+            return id ? `/notes/${id}` : `/new?title=${encodeURIComponent(title)}`;
+        };
+    }, [links]);
 
     const wordCount = useMemo(() => {
         if (!note?.content) return 0;
@@ -187,25 +286,51 @@ export default function NoteEdit() {
         }
     }
 
+    const loadLinks = useCallback(async () => {
+        try {
+            setLinks(await apiFetch(`/api/notes/${id}/links`));
+        } catch {
+            setLinks({ outgoing: [], backlinks: [] });
+        }
+    }, [id]);
+
     // ── Save ────────────────────────────────────────────────────────────────────
-    const save = useCallback(async () => {
+    // force skips the If-Match check, which is how "overwrite theirs" resolves a
+    // conflict.
+    const save = useCallback(async ({ force = false } = {}) => {
         if (!note) return;
         setErr("");
         try {
-            await apiFetch(`/api/notes/${id}`, {
+            const res = await apiFetch(`/api/notes/${id}`, {
                 method: "PUT",
+                headers: !force && note.updatedAt ? { "If-Match": note.updatedAt } : undefined,
                 body: { title: note.title, content: note.content, tags: note.tags || "", isPinned: note.isPinned || false },
             });
+            setNote(n => ({ ...n, updatedAt: res?.updatedAt || n.updatedAt }));
             setSaved(true);
+            setConflict(null);
             try { localStorage.removeItem(`greynote-draft-${id}`); } catch {}
+            loadLinks();
         } catch (e) {
+            if (e.status === 409) {
+                setConflict(e.data?.current ?? null);
+                return;
+            }
             setErr(e.message);
         }
-    }, [note, id]);
+    }, [note, id, loadLinks]);
+
+    function loadServerVersion() {
+        if (!conflict) { setConflict(null); return; }
+        setNote(n => ({ ...n, ...conflict }));
+        setSaved(true);
+        setConflict(null);
+        try { localStorage.removeItem(`greynote-draft-${id}`); } catch {}
+    }
 
     // ── Delete ──────────────────────────────────────────────────────────────────
     async function del() {
-        if (!confirm("Delete this note? This cannot be undone.")) return;
+        if (!confirm("Move this note to the trash? You can restore it from there.")) return;
         setErr("");
         try {
             await apiFetch(`/api/notes/${id}`, { method: "DELETE" });
@@ -389,7 +514,15 @@ export default function NoteEdit() {
         return () => window.removeEventListener("beforeunload", handler);
     }, [saved]);
 
-    useEffect(() => { load(); }, [id]);
+    // Everything below is per-note state: clearing it on an id change stops one
+    // note's editor content, conflict or backlinks from bleeding into the next.
+    useEffect(() => {
+        setNote(null);
+        setConflict(null);
+        setLinks({ outgoing: [], backlinks: [] });
+        load();
+        loadLinks();
+    }, [id, loadLinks]);
 
     if (err && !note) return <div style={{ color: "var(--color-danger)" }}>{err}</div>;
     if (!note) return <div>Loading...</div>;
@@ -413,7 +546,7 @@ export default function NoteEdit() {
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                 <button onClick={goBack}>← Back</button>
                 <button
-                    onClick={save}
+                    onClick={() => save()}
                     style={{
                         fontWeight: saved ? 400 : 700,
                         background: saved ? "var(--color-surface)" : "var(--color-accent)",
@@ -433,11 +566,19 @@ export default function NoteEdit() {
                     </button>
                     <button onClick={exportMd} title="Download .md">↓ .md</button>
                     <button onClick={exportHtml} title="Download .html">↓ .html</button>
-                    <button onClick={del} style={{ color: "var(--color-danger)" }}>Delete</button>
+                    <button onClick={del} style={{ color: "var(--color-danger)" }} title="Move to trash">Delete</button>
                 </div>
             </div>
 
             {err && <div style={{ color: "var(--color-danger)" }}>{err}</div>}
+
+            {conflict !== null && (
+                <ConflictBanner
+                    current={conflict}
+                    onKeepMine={() => save({ force: true })}
+                    onUseTheirs={loadServerVersion}
+                />
+            )}
 
             {/* Timestamps */}
             <div style={{ display: "flex", gap: 12, color: "var(--color-text-muted)", fontSize: 12 }}>
@@ -471,7 +612,7 @@ export default function NoteEdit() {
                 ref={markdownRef}
                 style={{ padding: 12, border: "1px solid var(--color-border)", borderRadius: 8, display: preview ? "block" : "none", minHeight: 80 }}
             >
-                <MarkdownRenderer>{note.content}</MarkdownRenderer>
+                <MarkdownRenderer wikiHref={wikiHref}>{note.content}</MarkdownRenderer>
             </div>
 
             {!preview && (
@@ -538,6 +679,12 @@ export default function NoteEdit() {
                         <button onClick={enableShare} style={{ alignSelf: "start" }}>Create share link</button>
                     </div>
                 )}
+            </div>
+
+            {/* Links */}
+            <div style={{ padding: 12, border: "1px solid var(--color-border)", borderRadius: 8, display: "grid", gap: 8 }}>
+                <div style={{ fontWeight: 700 }}>Links</div>
+                <LinksPanel links={links} />
             </div>
 
             {/* Version history */}

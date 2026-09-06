@@ -9,7 +9,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=1 GOOS=linux go build -o server .
+# sqlite_fts5 enables the FTS5 extension the search index needs; without it the
+# server still runs but falls back to scanning.
+RUN CGO_ENABLED=1 GOOS=linux go build -tags sqlite_fts5 -o server .
 
 FROM alpine:3.20
 

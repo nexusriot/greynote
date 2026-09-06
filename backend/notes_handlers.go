@@ -16,10 +16,26 @@ import (
 
 type NotesHandlers struct {
 	DB *sql.DB
+	// TrashRetention is how long a soft-deleted note is kept before the sweeper
+	// removes it. Zero disables automatic purging.
+	TrashRetention time.Duration
 }
 
-func NewNotesHandlers(db *sql.DB) *NotesHandlers {
-	return &NotesHandlers{DB: db}
+func NewNotesHandlers(db *sql.DB, trashRetention time.Duration) *NotesHandlers {
+	return &NotesHandlers{DB: db, TrashRetention: trashRetention}
+}
+
+// GET /api/notes/search?q=&limit= — ranked full-text search over live notes
+func (h *NotesHandlers) Search(c *gin.Context) {
+	userID := getUserID(c)
+
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	hits, err := searchNotes(h.DB, userID, c.Query("q"), limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "search error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"results": hits, "indexed": ftsEnabled})
 }
 
 type noteDTO struct {
@@ -40,6 +56,9 @@ type noteUpsertReq struct {
 	Content  string `json:"content"`
 	Tags     string `json:"tags"`
 	IsPinned bool   `json:"isPinned"`
+	// BaseUpdatedAt is the note version the client loaded; an alternative to the
+	// If-Match header for clients that cannot set headers easily.
+	BaseUpdatedAt string `json:"baseUpdatedAt"`
 }
 
 type noteVersionDTO struct {
@@ -53,12 +72,19 @@ type noteVersionDTO struct {
 func (h *NotesHandlers) List(c *gin.Context) {
 	userID := getUserID(c)
 
-	rows, err := h.DB.Query(
-		`SELECT id, title, content, tags, is_pinned, created_at, updated_at
-		 FROM notes WHERE user_id = ?
-		 ORDER BY is_pinned DESC, updated_at DESC`,
-		userID,
-	)
+	query := `SELECT n.id, n.title, n.content, n.tags, n.is_pinned, n.created_at, n.updated_at
+		 FROM notes n WHERE n.user_id = ? AND n.deleted_at IS NULL`
+	args := []any{userID}
+
+	for _, tag := range normalizeTags(c.Query("tag")) {
+		query += ` AND EXISTS (
+			SELECT 1 FROM note_tags nt JOIN tags t ON t.id = nt.tag_id
+			WHERE nt.note_id = n.id AND t.user_id = n.user_id AND t.name = ?)`
+		args = append(args, tag)
+	}
+	query += ` ORDER BY n.is_pinned DESC, n.updated_at DESC`
+
+	rows, err := h.DB.Query(query, args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
@@ -103,6 +129,16 @@ func (h *NotesHandlers) Create(c *gin.Context) {
 		return
 	}
 	id, _ := res.LastInsertId()
+
+	if _, err := setNoteTags(h.DB, userID, id, req.Tags); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if err := indexNoteGraph(h.DB, userID, id, req.Content); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+
 	c.JSON(http.StatusCreated, gin.H{"id": id})
 }
 
@@ -113,7 +149,8 @@ func (h *NotesHandlers) Get(c *gin.Context) {
 	var n noteDTO
 	var isPinned int
 	err := h.DB.QueryRow(
-		`SELECT id, title, content, tags, is_pinned, created_at, updated_at FROM notes WHERE id = ? AND user_id = ?`,
+		`SELECT id, title, content, tags, is_pinned, created_at, updated_at
+		 FROM notes WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
 		id, userID,
 	).Scan(&n.ID, &n.Title, &n.Content, &n.Tags, &isPinned, &n.CreatedAt, &n.UpdatedAt)
 	if err != nil {
@@ -151,22 +188,41 @@ func (h *NotesHandlers) Update(c *gin.Context) {
 	// Snapshot current state as a version before overwriting.
 	var oldTitle, oldContent, oldTags, oldUpdatedAt string
 	if err := h.DB.QueryRow(
-		`SELECT title, content, tags, updated_at FROM notes WHERE id = ? AND user_id = ?`,
+		`SELECT title, content, tags, updated_at FROM notes WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
 		id, userID,
-	).Scan(&oldTitle, &oldContent, &oldTags, &oldUpdatedAt); err == nil {
-		_, _ = h.DB.Exec(
-			`INSERT INTO note_versions(note_id, title, content, tags, saved_at) VALUES(?,?,?,?,?)`,
-			id, oldTitle, oldContent, oldTags, oldUpdatedAt,
-		)
+	).Scan(&oldTitle, &oldContent, &oldTags, &oldUpdatedAt); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
 	}
+
+	// Optimistic concurrency: a client that sends the updatedAt it loaded gets a
+	// 409 instead of silently overwriting a newer save from another device.
+	if base := clientBaseVersion(c, req.BaseUpdatedAt); base != "" && base != oldUpdatedAt {
+		current, err := h.loadNote(userID, id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "this note was changed elsewhere since you loaded it",
+			"current": current,
+		})
+		return
+	}
+
+	_, _ = h.DB.Exec(
+		`INSERT INTO note_versions(note_id, title, content, tags, saved_at) VALUES(?,?,?,?,?)`,
+		id, oldTitle, oldContent, oldTags, oldUpdatedAt,
+	)
 
 	isPinned := 0
 	if req.IsPinned {
 		isPinned = 1
 	}
+	updatedAt := nextVersionStamp(oldUpdatedAt)
 	res, err := h.DB.Exec(
-		`UPDATE notes SET title=?, content=?, tags=?, is_pinned=?, updated_at=? WHERE id=? AND user_id=?`,
-		req.Title, req.Content, req.Tags, isPinned, nowRFC3339(), id, userID,
+		`UPDATE notes SET title=?, content=?, tags=?, is_pinned=?, updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`,
+		req.Title, req.Content, req.Tags, isPinned, updatedAt, id, userID,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -176,20 +232,78 @@ func (h *NotesHandlers) Update(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-	c.Status(http.StatusNoContent)
+
+	if _, err := setNoteTags(h.DB, userID, id, req.Tags); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if err := indexNoteGraph(h.DB, userID, id, req.Content); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"updatedAt": updatedAt})
+}
+
+// clientBaseVersion reads the note version the client believes it is editing,
+// from either the If-Match header or the request body.
+func clientBaseVersion(c *gin.Context, bodyValue string) string {
+	if h := strings.Trim(strings.TrimSpace(c.GetHeader("If-Match")), `"`); h != "" {
+		return h
+	}
+	return strings.TrimSpace(bodyValue)
+}
+
+// indexNoteGraph refreshes a note's outgoing links, re-resolves the user's link
+// graph (a new or renamed title can resolve links from other notes) and keeps
+// the search index current.
+func indexNoteGraph(ex execer, userID, noteID int64, content string) error {
+	if err := setNoteLinks(ex, noteID, content); err != nil {
+		return err
+	}
+	if err := resolveUserLinks(ex, userID); err != nil {
+		return err
+	}
+	return reindexNote(ex, noteID)
+}
+
+// loadNote reads one live note plus its share metadata.
+func (h *NotesHandlers) loadNote(userID, id int64) (*noteDTO, error) {
+	var n noteDTO
+	var isPinned int
+	err := h.DB.QueryRow(
+		`SELECT id, title, content, tags, is_pinned, created_at, updated_at
+		 FROM notes WHERE id = ? AND user_id = ? AND deleted_at IS NULL`, id, userID,
+	).Scan(&n.ID, &n.Title, &n.Content, &n.Tags, &isPinned, &n.CreatedAt, &n.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	n.IsPinned = isPinned == 1
+	return &n, nil
 }
 
 func (h *NotesHandlers) Delete(c *gin.Context) {
 	userID := getUserID(c)
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
-	res, err := h.DB.Exec(`DELETE FROM notes WHERE id=? AND user_id=?`, id, userID)
+	res, err := h.DB.Exec(
+		`UPDATE notes SET deleted_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`,
+		nowRFC3339(), id, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
 	if aff, _ := res.RowsAffected(); aff == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+
+	if err := deindexNote(h.DB, id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+	if err := resolveUserLinks(h.DB, userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -201,7 +315,7 @@ func (h *NotesHandlers) TogglePin(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	var current int
-	if err := h.DB.QueryRow(`SELECT is_pinned FROM notes WHERE id=? AND user_id=?`, id, userID).Scan(&current); err != nil {
+	if err := h.DB.QueryRow(`SELECT is_pinned FROM notes WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, userID).Scan(&current); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
@@ -216,7 +330,7 @@ func (h *NotesHandlers) ListVersions(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	var dummy int64
-	if err := h.DB.QueryRow(`SELECT id FROM notes WHERE id=? AND user_id=?`, id, userID).Scan(&dummy); err != nil {
+	if err := h.DB.QueryRow(`SELECT id FROM notes WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, userID).Scan(&dummy); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
@@ -255,7 +369,7 @@ func (h *NotesHandlers) GetVersion(c *gin.Context) {
 	versionID, _ := strconv.ParseInt(c.Param("vid"), 10, 64)
 
 	var dummy int64
-	if err := h.DB.QueryRow(`SELECT id FROM notes WHERE id=? AND user_id=?`, noteID, userID).Scan(&dummy); err != nil {
+	if err := h.DB.QueryRow(`SELECT id FROM notes WHERE id=? AND user_id=? AND deleted_at IS NULL`, noteID, userID).Scan(&dummy); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
@@ -277,7 +391,7 @@ func (h *NotesHandlers) CreateOrEnableShare(c *gin.Context) {
 	noteID, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	var dummy int64
-	if err := h.DB.QueryRow(`SELECT id FROM notes WHERE id=? AND user_id=?`, noteID, userID).Scan(&dummy); err != nil {
+	if err := h.DB.QueryRow(`SELECT id FROM notes WHERE id=? AND user_id=? AND deleted_at IS NULL`, noteID, userID).Scan(&dummy); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
@@ -324,7 +438,7 @@ func (h *NotesHandlers) DisableShare(c *gin.Context) {
 	noteID, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	var dummy int64
-	if err := h.DB.QueryRow(`SELECT id FROM notes WHERE id=? AND user_id=?`, noteID, userID).Scan(&dummy); err != nil {
+	if err := h.DB.QueryRow(`SELECT id FROM notes WHERE id=? AND user_id=? AND deleted_at IS NULL`, noteID, userID).Scan(&dummy); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
@@ -338,7 +452,7 @@ func (h *NotesHandlers) SetSharePassword(c *gin.Context) {
 	noteID, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	var dummy int64
-	if err := h.DB.QueryRow(`SELECT id FROM notes WHERE id=? AND user_id=?`, noteID, userID).Scan(&dummy); err != nil {
+	if err := h.DB.QueryRow(`SELECT id FROM notes WHERE id=? AND user_id=? AND deleted_at IS NULL`, noteID, userID).Scan(&dummy); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
@@ -369,7 +483,8 @@ func (h *NotesHandlers) ExportZip(c *gin.Context) {
 	userID := getUserID(c)
 
 	rows, err := h.DB.Query(
-		`SELECT title, content FROM notes WHERE user_id = ? ORDER BY updated_at DESC`, userID,
+		`SELECT title, content, tags, is_pinned, created_at, updated_at
+		 FROM notes WHERE user_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC`, userID,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
@@ -385,8 +500,9 @@ func (h *NotesHandlers) ExportZip(c *gin.Context) {
 
 	seen := map[string]int{}
 	for rows.Next() {
-		var title, content string
-		if err := rows.Scan(&title, &content); err != nil {
+		var title, content, tags, createdAt, updatedAt string
+		var isPinned int
+		if err := rows.Scan(&title, &content, &tags, &isPinned, &createdAt, &updatedAt); err != nil {
 			continue
 		}
 
@@ -404,8 +520,45 @@ func (h *NotesHandlers) ExportZip(c *gin.Context) {
 		if err != nil {
 			continue
 		}
-		fmt.Fprintf(w, "# %s\n\n%s", title, content)
+		fmt.Fprint(w, exportMarkdown(title, content, tags, isPinned == 1, createdAt, updatedAt))
 	}
+}
+
+// exportMarkdown renders a note as a markdown file with YAML front matter, the
+// same shape the importer reads back.
+func exportMarkdown(title, content, tags string, isPinned bool, createdAt, updatedAt string) string {
+	var b strings.Builder
+	b.WriteString("---\n")
+	fmt.Fprintf(&b, "title: %s\n", yamlScalar(title))
+	if tagList := normalizeTags(tags); len(tagList) > 0 {
+		b.WriteString("tags:\n")
+		for _, t := range tagList {
+			fmt.Fprintf(&b, "  - %s\n", yamlScalar(t))
+		}
+	}
+	if isPinned {
+		b.WriteString("pinned: true\n")
+	}
+	fmt.Fprintf(&b, "created: %s\n", createdAt)
+	fmt.Fprintf(&b, "updated: %s\n", updatedAt)
+	b.WriteString("---\n\n")
+	b.WriteString(content)
+	if !strings.HasSuffix(content, "\n") {
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// yamlScalar quotes a value when plain YAML would misread it.
+func yamlScalar(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if s == "" {
+		return `""`
+	}
+	if strings.ContainsAny(s, `:#'"{}[],&*?|<>=!%@\`) || strings.TrimSpace(s) != s {
+		return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
+	}
+	return s
 }
 
 func sanitizeFilename(s string) string {
@@ -461,7 +614,8 @@ func (h *NotesHandlers) GetShared(c *gin.Context) {
 	var n noteDTO
 	var isPinned int
 	if err := h.DB.QueryRow(
-		`SELECT id, title, content, tags, is_pinned, created_at, updated_at FROM notes WHERE id=?`, noteID,
+		`SELECT id, title, content, tags, is_pinned, created_at, updated_at
+		 FROM notes WHERE id=? AND deleted_at IS NULL`, noteID,
 	).Scan(&n.ID, &n.Title, &n.Content, &n.Tags, &isPinned, &n.CreatedAt, &n.UpdatedAt); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
@@ -476,7 +630,7 @@ func (h *NotesHandlers) SetShareExpiry(c *gin.Context) {
 	noteID, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 
 	var dummy int64
-	if err := h.DB.QueryRow(`SELECT id FROM notes WHERE id=? AND user_id=?`, noteID, userID).Scan(&dummy); err != nil {
+	if err := h.DB.QueryRow(`SELECT id FROM notes WHERE id=? AND user_id=? AND deleted_at IS NULL`, noteID, userID).Scan(&dummy); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
@@ -507,9 +661,9 @@ func (h *NotesHandlers) Stats(c *gin.Context) {
 	userID := getUserID(c)
 
 	var totalNotes int
-	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM notes WHERE user_id=?`, userID).Scan(&totalNotes)
+	_ = h.DB.QueryRow(`SELECT COUNT(*) FROM notes WHERE user_id=? AND deleted_at IS NULL`, userID).Scan(&totalNotes)
 
-	contentRows, err := h.DB.Query(`SELECT content FROM notes WHERE user_id=?`, userID)
+	contentRows, err := h.DB.Query(`SELECT content FROM notes WHERE user_id=? AND deleted_at IS NULL`, userID)
 	totalWords := 0
 	if err == nil {
 		defer contentRows.Close()
@@ -521,7 +675,7 @@ func (h *NotesHandlers) Stats(c *gin.Context) {
 		}
 	}
 
-	tagRows, _ := h.DB.Query(`SELECT tags FROM notes WHERE user_id=? AND tags != ''`, userID)
+	tagRows, _ := h.DB.Query(`SELECT tags FROM notes WHERE user_id=? AND deleted_at IS NULL AND tags != ''`, userID)
 	tagCounts := map[string]int{}
 	if tagRows != nil {
 		defer tagRows.Close()
@@ -552,7 +706,7 @@ func (h *NotesHandlers) Stats(c *gin.Context) {
 
 	monthRows, _ := h.DB.Query(`
 		SELECT strftime('%Y-%m', created_at) AS month, COUNT(*) AS cnt
-		FROM notes WHERE user_id=?
+		FROM notes WHERE user_id=? AND deleted_at IS NULL
 		GROUP BY month ORDER BY month ASC`, userID)
 	type monthCount struct {
 		Month string `json:"month"`

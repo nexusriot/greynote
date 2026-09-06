@@ -203,8 +203,8 @@ fun NoteEditScreen(
     if (showDeleteDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteDialog = false },
-            title = { Text("Delete note?") },
-            text = { Text("\"${state.title.ifBlank { "Untitled" }}\" will be permanently deleted.") },
+            title = { Text("Move to trash?") },
+            text = { Text("\"${state.title.ifBlank { "Untitled" }}\" goes to the trash and can be restored from the web app.") },
             confirmButton = {
                 Button(
                     onClick = { showDeleteDialog = false; vm.delete(onBack) },
@@ -212,11 +212,30 @@ fun NoteEditScreen(
                     enabled = !state.deleting,
                 ) {
                     if (state.deleting) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    else Text("Delete")
+                    else Text("Move to trash")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteDialog = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    state.conflict?.let { theirs ->
+        AlertDialog(
+            onDismissRequest = { vm.dismissConflict() },
+            title = { Text("Changed on another device") },
+            text = {
+                Text(
+                    "This note was saved elsewhere at ${theirs.updatedAt}. " +
+                        "Keep your version, or load theirs and lose your edits?"
+                )
+            },
+            confirmButton = {
+                Button(onClick = { vm.save(force = true) }) { Text("Keep mine") }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.keepServerVersion() }) { Text("Load theirs") }
             },
         )
     }

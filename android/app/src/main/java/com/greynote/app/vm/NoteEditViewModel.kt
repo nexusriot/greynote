@@ -2,7 +2,9 @@ package com.greynote.app.vm
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.gson.Gson
 import com.greynote.app.api.ApiClient
+import com.greynote.app.api.model.ConflictResponse
 import com.greynote.app.api.model.Note
 import com.greynote.app.api.model.NoteUpsertRequest
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,6 +26,10 @@ data class NoteEditState(
     val deleted: Boolean = false,
     val error: String? = null,
     val previewMode: Boolean = false,
+    // baseUpdatedAt is the version this editor loaded; it is sent back as
+    // If-Match so a save cannot silently overwrite another device's newer one.
+    val baseUpdatedAt: String? = null,
+    val conflict: Note? = null,
 )
 
 class NoteEditViewModel : ViewModel() {
@@ -47,6 +53,8 @@ class NoteEditViewModel : ViewModel() {
                             tags = n.tags,
                             isPinned = n.isPinned,
                             saved = true,
+                            baseUpdatedAt = n.updatedAt,
+                            conflict = null,
                         )
                     }
                 } else {
@@ -63,8 +71,28 @@ class NoteEditViewModel : ViewModel() {
     fun setTags(v: String) = _state.update { it.copy(tags = v, saved = false) }
     fun togglePreview() = _state.update { it.copy(previewMode = !it.previewMode) }
     fun clearError() = _state.update { it.copy(error = null) }
+    fun dismissConflict() = _state.update { it.copy(conflict = null) }
 
-    fun save() {
+    // keepServerVersion discards the local edits in favour of the copy another
+    // device saved.
+    fun keepServerVersion() {
+        val theirs = _state.value.conflict ?: return
+        _state.update {
+            it.copy(
+                title = theirs.title,
+                content = theirs.content,
+                tags = theirs.tags,
+                isPinned = theirs.isPinned,
+                baseUpdatedAt = theirs.updatedAt,
+                conflict = null,
+                saved = true,
+            )
+        }
+    }
+
+    // force skips the version check, which is how the user resolves a conflict in
+    // favour of their own copy.
+    fun save(force: Boolean = false) {
         viewModelScope.launch {
             val s = _state.value
             _state.update { it.copy(saving = true, error = null) }
@@ -72,17 +100,37 @@ class NoteEditViewModel : ViewModel() {
                 val res = ApiClient.api.updateNote(
                     s.id,
                     NoteUpsertRequest(s.title, s.content, s.tags, s.isPinned),
+                    if (force) null else s.baseUpdatedAt,
                 )
-                if (res.isSuccessful) {
-                    _state.update { it.copy(saving = false, saved = true) }
-                } else {
-                    _state.update { it.copy(saving = false, error = "Save failed (${res.code()})") }
+                when {
+                    res.isSuccessful -> _state.update {
+                        it.copy(
+                            saving = false,
+                            saved = true,
+                            conflict = null,
+                            baseUpdatedAt = res.body()?.updatedAt ?: it.baseUpdatedAt,
+                        )
+                    }
+                    res.code() == 409 -> {
+                        val theirs = parseConflict(res.errorBody()?.string())
+                        _state.update {
+                            it.copy(
+                                saving = false,
+                                conflict = theirs,
+                                error = if (theirs == null) "This note changed on another device" else null,
+                            )
+                        }
+                    }
+                    else -> _state.update { it.copy(saving = false, error = "Save failed (${res.code()})") }
                 }
             } catch (e: Exception) {
                 _state.update { it.copy(saving = false, error = e.message ?: "Network error") }
             }
         }
     }
+
+    private fun parseConflict(body: String?): Note? =
+        body?.let { runCatching { Gson().fromJson(it, ConflictResponse::class.java).current }.getOrNull() }
 
     fun togglePin() {
         viewModelScope.launch {

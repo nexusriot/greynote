@@ -11,6 +11,9 @@ import AdminUsers from "./pages/AdminUsers";
 import Sessions from "./pages/Sessions";
 import Settings from "./pages/Settings";
 import Stats from "./pages/Stats";
+import Trash from "./pages/Trash";
+import Tags from "./pages/Tags";
+import NewNote from "./pages/NewNote";
 
 function Shell({ children }) {
     const { me, loading, logout } = useAuth();
@@ -49,9 +52,17 @@ function Shell({ children }) {
                 )}
 
                 {!loading && me && (
-                    <Link to="/stats" style={{ textDecoration: "none", color: "var(--color-text-muted)", fontSize: 14 }}>
-                        Stats
-                    </Link>
+                    <>
+                        <Link to="/tags" style={{ textDecoration: "none", color: "var(--color-text-muted)", fontSize: 14 }}>
+                            Tags
+                        </Link>
+                        <Link to="/trash" style={{ textDecoration: "none", color: "var(--color-text-muted)", fontSize: 14 }}>
+                            Trash
+                        </Link>
+                        <Link to="/stats" style={{ textDecoration: "none", color: "var(--color-text-muted)", fontSize: 14 }}>
+                            Stats
+                        </Link>
+                    </>
                 )}
 
                 {!loading && me?.isAdmin && (
@@ -108,6 +119,9 @@ export default function App() {
                             <Route path="/sessions" element={<RequireAuth><Sessions /></RequireAuth>} />
                             <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
                             <Route path="/stats" element={<RequireAuth><Stats /></RequireAuth>} />
+                            <Route path="/tags" element={<RequireAuth><Tags /></RequireAuth>} />
+                            <Route path="/trash" element={<RequireAuth><Trash /></RequireAuth>} />
+                            <Route path="/new" element={<RequireAuth><NewNote /></RequireAuth>} />
                             <Route path="/" element={<RequireAuth><Notes /></RequireAuth>} />
                             <Route path="/notes/:id" element={<RequireAuth><NoteEdit /></RequireAuth>} />
                             <Route path="/share/:token" element={<ShareView />} />

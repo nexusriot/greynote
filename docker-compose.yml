@@ -21,6 +21,9 @@ services:
       # 7 days
       SESSION_TTL_HOURS: "168"
 
+      # days a note stays in the trash before it is purged (0 = keep forever)
+      TRASH_RETENTION_DAYS: "30"
+
       # admin bootstrap
       ADMIN_EMAIL: "admin@example.com"
       ADMIN_PASSWORD: "supersecret123"

@@ -157,6 +157,13 @@ func (h *AuthHandlers) DeleteUserAdmin(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
+	// drop the notes from the search index first — it has no foreign keys, so the
+	// note text would survive the cascade
+	if err := deindexUserNotes(tx, targetID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
+
 	// delete share links for notes of this user
 	_, _ = tx.Exec(`
 		DELETE FROM share_links
@@ -327,6 +334,10 @@ func (h *AuthHandlers) DeleteAccount(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
+	if err := deindexUserNotes(tx, userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+		return
+	}
 	_, _ = tx.Exec(`DELETE FROM share_links WHERE note_id IN (SELECT id FROM notes WHERE user_id = ?)`, userID)
 	_, _ = tx.Exec(`DELETE FROM note_versions WHERE note_id IN (SELECT id FROM notes WHERE user_id = ?)`, userID)
 	_, _ = tx.Exec(`DELETE FROM notes WHERE user_id = ?`, userID)
