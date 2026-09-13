@@ -1,7 +1,8 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetch } from "../api";
 import { useAuth } from "../auth";
+import { appVersion, versionLine } from "../version";
 
 function Section({ title, children }) {
     return (
@@ -23,6 +24,16 @@ export default function Settings() {
 
     const [deletePw, setDeletePw] = useState("");
     const [deleteMsg, setDeleteMsg] = useState("");
+
+    const [serverVersion, setServerVersion] = useState(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        apiFetch("/api/version")
+            .then(res => { if (!cancelled) setServerVersion(res?.version || ""); })
+            .catch(() => { if (!cancelled) setServerVersion(""); });
+        return () => { cancelled = true; };
+    }, []);
 
     async function changePassword(e) {
         e.preventDefault();
@@ -97,6 +108,12 @@ export default function Settings() {
                     )}
                     <button type="submit" style={{ alignSelf: "start" }}>Change password</button>
                 </form>
+            </Section>
+
+            <Section title="About">
+                <p style={{ margin: 0, fontSize: 13, color: "var(--color-text-muted)" }}>
+                    {serverVersion === null ? "Checking the server…" : versionLine(appVersion, serverVersion)}
+                </p>
             </Section>
 
             <Section title="Danger zone">

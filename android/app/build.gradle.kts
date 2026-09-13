@@ -24,7 +24,8 @@ android {
         }
     }
 
-    buildFeatures { compose = true }
+    // buildConfig carries versionName into the app, for the About line.
+    buildFeatures { compose = true; buildConfig = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
     kotlinOptions { jvmTarget = "1.8" }
     compileOptions {

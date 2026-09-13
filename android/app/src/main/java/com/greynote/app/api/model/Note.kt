@@ -108,7 +108,14 @@ data class ShareResponse(val token: String = "", val shareUrl: String = "")
 
 data class SharePasswordRequest(val password: String)
 
+// An empty expiresAt clears the expiry: the link then works until disabled.
+data class ShareExpiryRequest(val expiresAt: String = "")
+
 data class ImageUploadResponse(val url: String)
+
+data class ImportSkip(val name: String = "", val reason: String = "")
+
+data class ImportResponse(val imported: Int = 0, val skipped: List<ImportSkip> = emptyList())
 
 data class StatsResponse(
     val totalNotes: Int = 0,

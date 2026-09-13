@@ -7,6 +7,9 @@ import retrofit2.Response
 import retrofit2.http.*
 
 interface ApiService {
+    @GET("api/version")
+    suspend fun version(): Response<VersionResponse>
+
     @POST("api/login")
     suspend fun login(@Body req: LoginRequest): Response<Unit>
 
@@ -18,6 +21,31 @@ interface ApiService {
 
     @PUT("api/account/password")
     suspend fun changePassword(@Body req: ChangePasswordRequest): Response<Unit>
+
+    // Retrofit refuses @Body on @DELETE, and closing an account has to carry
+    // the password, so this one is spelled out with @HTTP.
+    @HTTP(method = "DELETE", path = "api/account", hasBody = true)
+    suspend fun deleteAccount(@Body req: PasswordRequest): Response<Unit>
+
+    @GET("api/sessions")
+    suspend fun sessions(): Response<List<SessionInfo>>
+
+    @DELETE("api/sessions/{id}")
+    suspend fun revokeSession(@Path("id") id: Long): Response<Unit>
+
+    // ---- administration ----------------------------------------------------
+
+    @GET("api/admin/users")
+    suspend fun users(): Response<List<AdminUser>>
+
+    @POST("api/admin/users")
+    suspend fun createUser(@Body req: CreateUserRequest): Response<Unit>
+
+    @PUT("api/admin/users/{id}/admin")
+    suspend fun setUserAdmin(@Path("id") id: Long, @Body req: AdminFlagRequest): Response<Unit>
+
+    @DELETE("api/admin/users/{id}")
+    suspend fun deleteUser(@Path("id") id: Long): Response<Unit>
 
     // ---- notes -------------------------------------------------------------
 
@@ -82,6 +110,10 @@ interface ApiService {
 
     // ---- journal and templates --------------------------------------------
 
+    // The entry for one day, or 404 when that day has none.
+    @GET("api/notes/daily")
+    suspend fun dailyNote(@Query("date") date: String? = null): Response<Note>
+
     @POST("api/notes/daily")
     suspend fun openDaily(@Body req: DailyRequest): Response<DailyResponse>
 
@@ -137,10 +169,27 @@ interface ApiService {
     @PUT("api/notes/{id}/share/password")
     suspend fun setSharePassword(@Path("id") id: Long, @Body req: SharePasswordRequest): Response<Unit>
 
+    @PUT("api/notes/{id}/share/expiry")
+    suspend fun setShareExpiry(@Path("id") id: Long, @Body req: ShareExpiryRequest): Response<Unit>
+
+    /**
+     * Reads a note someone shared. The link is the credential, so this is the
+     * one call that needs no session — a password only if the link has one.
+     */
+    @GET("api/share/{token}")
+    suspend fun sharedNote(
+        @Path("token") token: String,
+        @Header("X-Share-Password") password: String? = null,
+    ): Response<Note>
+
     @Multipart
     @POST("api/images")
     suspend fun uploadImage(@Part file: MultipartBody.Part): Response<ImageUploadResponse>
 
     @GET("api/notes/export")
     suspend fun exportAll(): Response<ResponseBody>
+
+    @Multipart
+    @POST("api/notes/import")
+    suspend fun importNotes(@Part file: MultipartBody.Part): Response<ImportResponse>
 }

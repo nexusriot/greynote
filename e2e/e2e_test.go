@@ -40,6 +40,10 @@ func envOr(key, fallback string) string {
 type client struct {
 	t    *testing.T
 	http *http.Client
+	// probe clients are the ones driving the guard matrix: their requests are
+	// deliberately left out of the route-coverage record, since bouncing off a
+	// 401 is not coverage of an endpoint.
+	probe bool
 }
 
 func newClient(t *testing.T) *client {
@@ -50,6 +54,12 @@ func newClient(t *testing.T) *client {
 		t.Fatal(err)
 	}
 	return &client{t: t, http: &http.Client{Jar: jar, Timeout: 30 * time.Second}}
+}
+
+// probing marks a client as a guard prober; see client.probe.
+func (c *client) probing() *client {
+	c.probe = true
+	return c
 }
 
 type response struct {
@@ -84,6 +94,9 @@ func truncate(body []byte) string {
 
 func (c *client) do(method, path string, body any, headers ...[2]string) *response {
 	c.t.Helper()
+	if !c.probe {
+		recordRoute(method, path)
+	}
 
 	var reader io.Reader
 	if body != nil {
@@ -120,6 +133,9 @@ func (c *client) do(method, path string, body any, headers ...[2]string) *respon
 
 func (c *client) upload(path, field, filename string, content []byte) *response {
 	c.t.Helper()
+	if !c.probe {
+		recordRoute(http.MethodPost, path)
+	}
 
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
@@ -152,6 +168,43 @@ func (c *client) login() {
 	c.t.Helper()
 	c.do(http.MethodPost, "/api/login", map[string]string{"email": email, "password": password}).
 		expect(http.StatusNoContent)
+}
+
+// account is a throwaway user with a live session, created through the admin
+// API. Tests that revoke a session, change a password or close an account work
+// on one of these: none of that may disturb the shared admin login the rest of
+// the suite signs in with.
+type account struct {
+	*client
+	Email    string
+	Password string
+}
+
+func newAccount(t *testing.T, prefix string) *account {
+	t.Helper()
+
+	admin := newClient(t)
+	admin.login()
+
+	const userPassword = "password123"
+	userEmail := fmt.Sprintf("%s-%d@example.com", prefix, time.Now().UnixNano())
+	admin.do(http.MethodPost, "/api/admin/users",
+		map[string]any{"email": userEmail, "password": userPassword}).expect(http.StatusCreated)
+
+	c := newClient(t)
+	c.do(http.MethodPost, "/api/login",
+		map[string]string{"email": userEmail, "password": userPassword}).expect(http.StatusNoContent)
+	return &account{client: c, Email: userEmail, Password: userPassword}
+}
+
+// signIn opens a second session for the same account, as another device would.
+func (a *account) signIn(t *testing.T) *client {
+	t.Helper()
+
+	c := newClient(t)
+	c.do(http.MethodPost, "/api/login",
+		map[string]string{"email": a.Email, "password": a.Password}).expect(http.StatusNoContent)
+	return c
 }
 
 type note struct {
@@ -206,7 +259,18 @@ func TestMain(m *testing.M) {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	os.Exit(m.Run())
+
+	status := m.Run()
+	if status == 0 {
+		if missing := uncoveredRoutes(); len(missing) > 0 {
+			fmt.Fprintf(os.Stderr, "the suite never called %d of the server's routes:\n", len(missing))
+			for _, r := range missing {
+				fmt.Fprintf(os.Stderr, "  %s %s\n", r.Method, r.Path)
+			}
+			status = 1
+		}
+	}
+	os.Exit(status)
 }
 
 // ------------------------------------------------------------------ tests ---

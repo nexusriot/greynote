@@ -12,6 +12,10 @@ A self-hosted markdown notes app. Write, organise, link, and share notes with fu
 - Tag filtering, applied server-side and reflected in the URL
 - Word count displayed while editing
 
+**Every client, every endpoint**
+- The web, desktop and Android clients are separate front ends over one API, and each of them reaches every endpoint the server exposes — sessions, admin users, account closure, import/export, image upload, share expiry and reading someone else's share link included. `DESIGN.md` → *Client parity* is the endpoint-by-endpoint audit
+- `/health` is the exception: it exists for orchestrators, not people
+
 **Lists**
 - `GET /api/notes` returns snippets rather than whole note bodies (`?full=1` opts back in), takes `?limit=`/`?offset=`, and reports the unpaged total in `X-Total-Count`
 - The web list pages 50 notes at a time with a "load more" control
@@ -220,7 +224,20 @@ public API — health and auth, the note lifecycle including optimistic
 concurrency and the trash, ranked search, tag/folder filters and moves, wiki
 links and backlinks, templates and the one-per-day journal rule, public share
 links with passwords and expiry, image upload and serving, the export→import
-round trip, account isolation, and statistics.
+round trip, account isolation, and statistics. It also covers admin user
+management, password change and account closure, the session list, the tag
+catalogue with merge and delete, folder deletion, template editing, journal day
+lookup, emptying the trash, reading a version snapshot, disabling a share link,
+and list paging.
+
+Two things keep it honest. `e2e/guards_test.go` holds an inventory of every
+route the server registers: each authenticated route is called with no cookie
+and must answer 401, each admin route with a plain session and must answer 403,
+and the route counts are asserted so a new endpoint cannot be added without
+being listed. The harness also records which route every request hit, and the
+run fails at the end if any inventoried route was never called — so the suite
+cannot silently stop covering an endpoint. `KEEP_STACK=1` keeps the stack up for
+poking at.
 
 ## Development
 
@@ -423,9 +440,18 @@ app's own settings file so it survives a restart.
 - **Offline** — the note list is cached to `notes-cache.json` in the app's data
   directory. With the server down, a signed-in user gets their cached notes and a
   retry banner rather than a login screen. Editing still needs the server.
+- **Full API coverage** — alongside notes, tags, folders, templates, the
+  journal, trash, sharing and statistics, the desktop client covers the rest of
+  the server: sessions (list and revoke), the admin user list, password change
+  and account closure, import and export through native file dialogs, image
+  upload from a file *or the clipboard*, share-link expiry, and reading a share
+  link someone sent you.
 - **Self-test** — `npm run selftest` boots the real app, signs in, creates and
   edits a note, ticks a checkbox in the preview, searches, provokes and resolves
-  a save conflict, walks every screen, trashes and purges the note, and cleans up
+  a save conflict, walks every screen, uploads an image from the clipboard and
+  checks the server serves it, sets and clears a share expiry, reads its own
+  share link back, lists this computer's session, creates/promotes/deletes a
+  user, imports a markdown file, then trashes and purges the note and cleans up
   after itself — writing a screenshot per screen.
 
 ## Android client
@@ -437,6 +463,7 @@ The `android/` module is an offline-first Jetpack Compose app over the same REST
 - Notes live in a local Room database. Reads never touch the network; writes are marked dirty and pushed on the next sync (app start, pull-to-sync from the toolbar, or Settings → Sync now).
 - A push the server rejects with `409` is kept as a conflict rather than being dropped: the note shows a warning badge and the editor offers "keep mine" (re-push, overwriting) or "use theirs".
 - Cleartext HTTP is enabled (`usesCleartextTraffic="true"`) for local development; use HTTPS behind a reverse proxy in production.
+- Everything the server offers is reachable: the journal (any day, with the days that already have an entry), server-side ranked search as a separate screen from the offline list search, signed-in devices, the admin user list, account closure, import and export through the system file picker, share-link expiry, and reading a share link someone sent you.
 
 Build and test without Android Studio:
 

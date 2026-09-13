@@ -1,5 +1,8 @@
 package com.greynote.app.ui.screen
 
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -10,19 +13,55 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.greynote.app.BuildConfig
 import com.greynote.app.vm.SettingsViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
+fun SettingsScreen(
+    onBack: () -> Unit,
+    onOpenSessions: () -> Unit = {},
+    onOpenUsers: () -> Unit = {},
+    onOpenShared: () -> Unit = {},
+    onAccountClosed: () -> Unit = {},
+    vm: SettingsViewModel = viewModel(),
+) {
     val state by vm.state.collectAsStateWithLifecycle()
     var currentPw by remember { mutableStateOf("") }
     var newPw by remember { mutableStateOf("") }
+    var closePw by remember { mutableStateOf("") }
+    var confirmClose by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
+    val context = LocalContext.current
+
+    // The server picks the importer from the file's name, so the display name
+    // travels with the bytes.
+    val pickImport = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val resolver = context.contentResolver
+        val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        } ?: uri.lastPathSegment
+        val bytes = runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
+        if (bytes == null) return@rememberLauncherForActivityResult
+        vm.importNotes(name, bytes)
+    }
+
+    val exportFile = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val resolver = context.contentResolver
+        vm.exportNotes { bytes -> resolver.openOutputStream(uri)?.use { it.write(bytes) } }
+    }
+
+    LaunchedEffect(Unit) { vm.loadVersions(BuildConfig.VERSION_NAME) }
+    LaunchedEffect(state.accountClosed) { if (state.accountClosed) onAccountClosed() }
 
     LaunchedEffect(state.error, state.message) {
         val text = state.error ?: state.message
@@ -115,6 +154,91 @@ fun SettingsScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
                     newPw = ""
                 },
             ) { Text("Change password") }
+
+            HorizontalDivider()
+
+            Text("Account", style = MaterialTheme.typography.titleSmall)
+            Button(onClick = onOpenSessions, enabled = !state.busy) { Text("Signed-in devices") }
+            Button(onClick = onOpenShared, enabled = !state.busy) { Text("Open a shared link") }
+            Button(onClick = onOpenUsers, enabled = !state.busy) { Text("Users (administrators)") }
+
+            HorizontalDivider()
+
+            Text("Notes", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Import a .md, .markdown or .txt note, or a .zip of them.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(enabled = !state.busy, onClick = { pickImport.launch("*/*") }) {
+                Text(if (state.busy) "Working…" else "Import notes…")
+            }
+            Button(
+                enabled = !state.busy,
+                onClick = { exportFile.launch("greynote-export.zip") },
+            ) { Text("Export all notes (.zip)") }
+            state.importedCount?.let { count ->
+                Text("Imported $count note(s)", style = MaterialTheme.typography.labelSmall)
+            }
+            state.skippedImports.take(5).forEach { skip ->
+                Text(
+                    skip,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            HorizontalDivider()
+
+            Text("About", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "App ${state.appVersion.ifBlank { BuildConfig.VERSION_NAME }} · " +
+                    "server ${state.serverVersion.ifBlank { "checking…" }}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            HorizontalDivider()
+
+            Text("Close account", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Deletes the account and every note in it, on the server, for good.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = closePw,
+                onValueChange = { closePw = it },
+                label = { Text("Confirm with your password") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Password),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                enabled = !state.busy && closePw.isNotBlank(),
+                onClick = { confirmClose = true },
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+            ) { Text("Delete my account") }
         }
+    }
+
+    if (confirmClose) {
+        AlertDialog(
+            onDismissRequest = { confirmClose = false },
+            title = { Text("Delete this account?") },
+            text = { Text("Every note, tag, template and session goes with it. This cannot be undone.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmClose = false
+                        vm.deleteAccount(closePw)
+                        closePw = ""
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                ) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { confirmClose = false }) { Text("Cancel") } },
+        )
     }
 }

@@ -22,6 +22,8 @@ describe("ApiClient", () => {
                     url: req.url,
                     headers: req.headers,
                     body: Buffer.concat(chunks).toString("utf8"),
+                    // Decoding to text mangles binary; uploads are checked here.
+                    raw: Buffer.concat(chunks),
                 });
                 respond(req, res);
             });
@@ -160,6 +162,117 @@ describe("ApiClient", () => {
     it("refuses to call anything without a server address", async () => {
         const api = new ApiClient("");
         await expect(api.me()).rejects.toThrow(/server address/i);
+    });
+
+    it("posts an upload as multipart/form-data with the bytes intact", async () => {
+        const api = new ApiClient(baseUrl);
+        respond = json({ url: "/api/images/abc.png" });
+
+        const result = await api.uploadImage("shot.png", Buffer.from([0x89, 0x50, 0x4e, 0x47]), "image/png");
+
+        expect(result.url).toBe("/api/images/abc.png");
+        expect(requests[0].method).toBe("POST");
+        expect(requests[0].url).toBe("/api/images");
+
+        const boundary = requests[0].headers["content-type"].match(/boundary=(.+)$/)[1];
+        expect(boundary).toBeTruthy();
+        expect(requests[0].body).toContain(`--${boundary}`);
+        expect(requests[0].body).toContain('name="file"; filename="shot.png"');
+        expect(requests[0].body).toContain("image/png");
+        // The PNG magic bytes must survive the envelope untouched.
+        expect(requests[0].raw.includes(Buffer.from([0x89, 0x50, 0x4e, 0x47]))).toBe(true);
+        expect(requests[0].raw.subarray(-(boundary.length + 6)).toString())
+            .toBe(`--${boundary}--\r\n`);
+        expect(Number(requests[0].headers["content-length"])).toBe(requests[0].raw.length);
+    });
+
+    it("sends an import archive to the import endpoint", async () => {
+        const api = new ApiClient(baseUrl);
+        respond = json({ imported: 3, skipped: [] });
+
+        const result = await api.importNotes("export.zip", Buffer.from("PKzip"));
+
+        expect(result.imported).toBe(3);
+        expect(requests[0].url).toBe("/api/notes/import");
+        expect(requests[0].headers["content-type"]).toMatch(/^multipart\/form-data; boundary=/);
+    });
+
+    it("carries the share password in a header and nothing else", async () => {
+        const api = new ApiClient(baseUrl);
+        api.setCookie("notes_session=abc123");
+        respond = json({ id: 4, title: "Shared" });
+
+        await api.sharedNote("tok en", "letmein");
+
+        expect(requests[0].url).toBe("/api/share/tok%20en");
+        expect(requests[0].headers["x-share-password"]).toBe("letmein");
+    });
+
+    it("omits the share password header when there is none", async () => {
+        const api = new ApiClient(baseUrl);
+        respond = json({ id: 4 });
+
+        await api.sharedNote("token");
+
+        expect(requests[0].headers["x-share-password"]).toBeUndefined();
+    });
+
+    it("asks for one day's journal entry", async () => {
+        const api = new ApiClient(baseUrl);
+        respond = json({ id: 9, dailyDate: "2026-03-05" });
+
+        await api.dailyNote("2026-03-05");
+        expect(requests[0].url).toBe("/api/notes/daily?date=2026-03-05");
+
+        await api.dailyNote();
+        expect(requests[1].url).toBe("/api/notes/daily");
+    });
+
+    it("clears a share expiry by sending an empty string", async () => {
+        const api = new ApiClient(baseUrl);
+        respond = (req, res) => res.writeHead(204).end();
+
+        await api.setShareExpiry(7, "");
+
+        expect(requests[0].method).toBe("PUT");
+        expect(requests[0].url).toBe("/api/notes/7/share/expiry");
+        expect(JSON.parse(requests[0].body)).toEqual({ expiresAt: "" });
+    });
+
+    it("covers the account, session and admin routes", async () => {
+        const api = new ApiClient(baseUrl);
+        respond = (req, res) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end("[]");
+        };
+
+        await api.changePassword("old-one", "new-one");
+        await api.deleteAccount("old-one");
+        await api.sessions();
+        await api.revokeSession(12);
+        await api.users();
+        await api.createUser({ email: "new@example.com", password: "password123", isAdmin: true });
+        await api.setUserAdmin(3, false);
+        await api.deleteUser(3);
+        await api.serverVersion();
+
+        expect(requests.map(request => `${request.method} ${request.url}`)).toEqual([
+            "PUT /api/account/password",
+            "DELETE /api/account",
+            "GET /api/sessions",
+            "DELETE /api/sessions/12",
+            "GET /api/admin/users",
+            "POST /api/admin/users",
+            "PUT /api/admin/users/3/admin",
+            "DELETE /api/admin/users/3",
+            "GET /api/version",
+        ]);
+        expect(JSON.parse(requests[0].body)).toEqual({ currentPassword: "old-one", newPassword: "new-one" });
+        expect(JSON.parse(requests[1].body)).toEqual({ password: "old-one" });
+        expect(JSON.parse(requests[5].body)).toEqual({
+            email: "new@example.com", password: "password123", isAdmin: true,
+        });
+        expect(JSON.parse(requests[6].body)).toEqual({ isAdmin: false });
     });
 
     it("returns raw bytes for the export download", async () => {

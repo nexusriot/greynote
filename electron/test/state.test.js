@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
     createState,
     draftFrom,
+    insertSnippet,
     isDirty,
     listFilters,
     localDate,
@@ -126,5 +127,29 @@ describe("taskLineNumbers", () => {
 
     it("returns nothing for a note without tasks", () => {
         expect(taskLineNumbers("just text")).toEqual([]);
+    });
+});
+
+describe("insertSnippet", () => {
+    it("replaces the selection and reports where the caret lands", () => {
+        const { content, caret } = insertSnippet("hello world", 6, 11, "there");
+
+        expect(content).toBe("hello there");
+        expect(caret).toBe(11);
+    });
+
+    it("spaces a snippet off the word in front of it", () => {
+        expect(insertSnippet("see", 3, 3, "![](/x.png)").content).toBe("see ![](/x.png)");
+        expect(insertSnippet("see ", 4, 4, "![](/x.png)").content).toBe("see ![](/x.png)");
+        expect(insertSnippet("", 0, 0, "![](/x.png)").content).toBe("![](/x.png)");
+        expect(insertSnippet("line\n", 5, 5, "![](/x.png)").content).toBe("line\n![](/x.png)");
+    });
+
+    it("falls back to the end of the text when there is no cursor", () => {
+        expect(insertSnippet("body", undefined, undefined, "x").content).toBe("body x");
+    });
+
+    it("clamps a selection that runs past the end", () => {
+        expect(insertSnippet("ab", 99, 99, "c").content).toBe("ab c");
     });
 });

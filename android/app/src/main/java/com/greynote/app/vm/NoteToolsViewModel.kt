@@ -8,12 +8,17 @@ import com.greynote.app.api.model.Backlink
 import com.greynote.app.api.model.NoteVersion
 import com.greynote.app.api.model.NoteVersionSummary
 import com.greynote.app.api.model.SharePasswordRequest
+import com.greynote.app.api.model.ShareExpiryRequest
 import com.greynote.app.api.model.ShareRequest
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 data class NoteToolsState(
     val versions: List<NoteVersionSummary> = emptyList(),
@@ -22,6 +27,8 @@ data class NoteToolsState(
     val unresolvedLinks: List<String> = emptyList(),
     val shareUrl: String = "",
     val sharePasswordSet: Boolean = false,
+    /** RFC3339, or empty when the link does not expire. */
+    val shareExpiresAt: String = "",
     val loading: Boolean = true,
     val error: String? = null,
     val message: String? = null,
@@ -49,6 +56,7 @@ class NoteToolsViewModel : ViewModel() {
                         unresolvedLinks = links?.outgoing.orEmpty().filter { l -> l.id == null }.map { l -> l.title },
                         shareUrl = note?.shareUrl.orEmpty(),
                         sharePasswordSet = note?.sharePasswordSet ?: false,
+                        shareExpiresAt = note?.shareExpiresAt.orEmpty(),
                         loading = false,
                     )
                 }
@@ -97,7 +105,23 @@ class NoteToolsViewModel : ViewModel() {
 
     fun disableShare() = act("Sharing disabled") {
         val res = ApiClient.api.disableShare(noteId)
-        if (res.isSuccessful) _state.update { it.copy(shareUrl = "", sharePasswordSet = false) }
+        if (res.isSuccessful) {
+            _state.update { it.copy(shareUrl = "", sharePasswordSet = false, shareExpiresAt = "") }
+        }
+        res.isSuccessful
+    }
+
+    /** Stops the link working after [days] — a phone-sized substitute for a date picker. */
+    fun expireShareIn(days: Int) = act("The link expires in $days day(s)") {
+        val stamp = shareExpiryStamp(days)
+        val res = ApiClient.api.setShareExpiry(noteId, ShareExpiryRequest(stamp))
+        if (res.isSuccessful) _state.update { it.copy(shareExpiresAt = stamp) }
+        res.isSuccessful
+    }
+
+    fun clearShareExpiry() = act("The link no longer expires") {
+        val res = ApiClient.api.setShareExpiry(noteId, ShareExpiryRequest(""))
+        if (res.isSuccessful) _state.update { it.copy(shareExpiresAt = "") }
         res.isSuccessful
     }
 
@@ -117,4 +141,14 @@ class NoteToolsViewModel : ViewModel() {
             }
         }
     }
+}
+
+/**
+ * [days] from now as the RFC3339 UTC stamp the server parses. Second
+ * resolution: the expiry is a cut-off, not a version.
+ */
+fun shareExpiryStamp(days: Int, from: Date = Date()): String {
+    val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
+    format.timeZone = TimeZone.getTimeZone("UTC")
+    return format.format(Date(from.time + days.toLong() * 24 * 60 * 60 * 1000))
 }

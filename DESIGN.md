@@ -353,6 +353,89 @@ All three mutations return `{notesUpdated}`.
 | PUT | `/api/admin/users/:id/admin` | ✓ admin | Set/clear admin flag |
 | DELETE | `/api/admin/users/:id` | ✓ admin | Delete user (cascade) |
 
+
+---
+
+## Client parity
+
+The web, desktop and Android clients are separate front ends over the same API,
+and every endpoint the server exposes is reachable from each of them. The table
+below is the audit: where a client reaches an endpoint, and how.
+
+`/health` is the exception — it exists for orchestrators (the compose
+healthcheck, a load balancer), not for people, so no client calls it.
+
+| Endpoint | Web | Desktop | Android |
+|---|---|---|---|
+| `GET /api/version` | Settings → About | Settings → About | Settings → About |
+| `POST /api/login` | Login | Login | Login |
+| `POST /api/logout` | Menu | Settings | Menu |
+| `GET /api/me` | On load | On load | On load |
+| `PUT /api/account/password` | Settings | Settings | Settings |
+| `DELETE /api/account` | Settings → Danger zone | Settings → Close account | Settings → Close account |
+| `GET /api/sessions` | Sessions page | Sessions view | Settings → Signed-in devices |
+| `DELETE /api/sessions/:id` | Sessions page | Sessions view | Settings → Signed-in devices |
+| `GET /api/admin/users` | Admin page | Users view | Settings → Users |
+| `POST /api/admin/users` | Admin page | Users view | Settings → Users |
+| `PUT /api/admin/users/:id/admin` | Admin page | Users view | Settings → Users |
+| `DELETE /api/admin/users/:id` | Admin page | Users view | Settings → Users |
+| `GET /api/notes` | Note list | Note list | Sync (offline-first) |
+| `POST /api/notes` | Editor | Editor | Sync (push) |
+| `GET /api/notes/:id` | Editor | Editor | Sync (pull) |
+| `PUT /api/notes/:id` | Editor | Editor | Sync (push, `If-Match`) |
+| `DELETE /api/notes/:id` | Note list | Editor | Note list (via sync) |
+| `POST /api/notes/:id/pin` | Note list | Editor | Note list and editor |
+| `GET /api/notes/search` | Search box | Search box | Menu → Search the server |
+| `GET /api/notes/stats` | Stats page | Statistics view | Statistics screen |
+| `GET /api/notes/export` | Note list | Settings (save dialog) | Settings (document picker) |
+| `POST /api/notes/import` | Note list | Settings (file dialog) | Settings (file picker) |
+| `GET /api/notes/trash` | Trash page | Trash view | Trash screen |
+| `POST /api/notes/:id/restore` | Trash page | Trash view | Trash screen |
+| `DELETE /api/notes/:id/purge` | Trash page | Trash view | Trash screen |
+| `DELETE /api/notes/trash` | Trash page | Trash view | Trash screen |
+| `GET /api/notes/:id/links` | Editor | Editor | Note tools |
+| `GET /api/notes/:id/versions` | Editor | Editor | Note tools |
+| `GET /api/notes/:id/versions/:vid` | Editor | Editor | Note tools |
+| `GET /api/notes/daily` | Journal page | Journal view | Journal screen |
+| `POST /api/notes/daily` | Journal page | Journal view | Menu → Journal |
+| `GET /api/notes/daily/list` | Journal page | Journal view | Journal screen |
+| `GET /api/templates` | Templates page | Templates view | Templates screen |
+| `POST /api/templates` | Templates page | Templates view | Templates screen |
+| `PUT /api/templates/:id` | Templates page | Templates view | Templates screen |
+| `DELETE /api/templates/:id` | Templates page | Templates view | Templates screen |
+| `POST /api/templates/:id/apply` | Templates page | Templates view | Templates screen |
+| `GET /api/tags` | Tags page | Tags view | Tags screen |
+| `PUT /api/tags/:name` | Tags page | Tags view | Tags screen |
+| `POST /api/tags/merge` | Tags page | Tags view | Tags screen |
+| `DELETE /api/tags/:name` | Tags page | Tags view | Tags screen |
+| `GET /api/folders` | Sidebar | Sidebar | Tags & folders screen |
+| `PUT /api/folders` | Sidebar | Tags & folders view | Tags & folders screen |
+| `DELETE /api/folders` | Sidebar | Tags & folders view | Tags & folders screen |
+| `POST /api/notes/:id/share` | Editor | Editor | Note tools |
+| `POST /api/notes/:id/share/disable` | Editor | Editor | Note tools |
+| `PUT /api/notes/:id/share/password` | Editor | Editor | Note tools |
+| `PUT /api/notes/:id/share/expiry` | Editor | Editor | Note tools (7/30 days, never) |
+| `GET /api/share/:token` | Share page | Shared link view | Shared link screen |
+| `POST /api/images` | Editor (paste) | Editor (file or clipboard) | Editor (picker) |
+| `GET /api/images/:filename` | Markdown preview | Markdown preview | Markdown preview |
+
+### Where the clients deliberately differ
+
+- **Android searches locally first.** The note list filters the device's own
+  Room copy so it works with no connection; `GET /api/notes/search` is a
+  separate screen for when the server's ranking and match snippets are wanted.
+- **Android writes through the local database.** Creating, editing, pinning and
+  trashing a note touch Room first; `NotesRepository.sync()` is what reaches
+  `POST/PUT /api/notes`. The endpoints are used, but a save is not an HTTP call.
+- **The desktop client owns HTTP in the main process.** The renderer is
+  sandboxed, so every endpoint above is reached through a preload channel
+  (`window.greynote.*`) rather than `fetch`. File dialogs and the clipboard
+  belong to the main process too, which is why the desktop uploads an image from
+  a file or the clipboard rather than from a paste event.
+- **Only the web client renders `/share/:token` as a page**, because a share
+  link is a URL someone opens in a browser. The desktop and Android clients
+  instead take a pasted link and read the note through the same endpoint.
+
 ---
 
 ## Authentication
@@ -729,22 +812,44 @@ server cannot be reached, the app shows those notes with a retry banner instead
 of bouncing a signed-in user to a login screen; editing still requires the
 server, which is the honest boundary for a client with no local write log.
 
+### Views
+
+Notes with the editor, journal, templates, tags and folders, trash, statistics,
+settings — and, for the rest of the API, a shared-link reader, the session list
+and the admin user list. The sidebar hides *Users* unless `/api/me` says the
+account is an admin; the server enforces that regardless, so the hiding is
+courtesy rather than a control.
+
 ### Desktop affordances
 
 Native menus and accelerators, a tray icon, a global quick-capture shortcut that
-works while the window is hidden, and native save dialogs for "save note as" and
-"export all notes". Commands from all three sources funnel into one `command`
-channel the renderer listens on.
+works while the window is hidden, and native dialogs for "save note as", "export
+all notes", "import notes" and "insert image". Commands from all three sources
+funnel into one `command` channel the renderer listens on.
+
+Two upload paths exist because the renderer is sandboxed and has no file access:
+a file dialog in the main process, and `clipboard.readImage()` for the
+screenshot-then-paste case. Both post multipart bodies the main-process client
+builds by hand — one small function rather than a dependency for two calls.
 
 ### Self-test
 
 `npm run selftest` launches the real app with `--selftest`, which drives the
 renderer through `window.__greynote_test__` against a running backend: sign in,
 create, edit, save, preview, tick a checkbox, search, provoke a `409` and resolve
-it, visit every screen, trash and purge, then clean up. It captures a screenshot
-per screen and exits non-zero on the first failed step. `GREYNOTE_OFFLINE_CHECK=1`
-runs a shorter variant that asserts the cached-notes fallback with the server
-stopped.
+it, visit every screen, paste an image from the clipboard and check the server
+serves the link the editor wrote, set and clear a share expiry, read its own
+share link back through the shared-link view, list this computer's session,
+refuse a password change with the wrong current password, refuse to close the
+account without one, import a markdown file, create/promote/delete a user, then
+trash and purge the note and clean up. It captures a screenshot per screen and
+exits non-zero on the first failed step. `GREYNOTE_OFFLINE_CHECK=1` runs a
+shorter variant that asserts the cached-notes fallback with the server stopped.
+
+The clipboard step needs a real image: `nativeImage` silently yields an empty
+image for malformed PNG bytes, and an empty clipboard image is indistinguishable
+from a broken one, so the test inlines a valid 2×2 PNG and asserts the "there is
+no image on the clipboard" path first.
 
 ## Android client
 
@@ -807,6 +912,21 @@ folders, templates, journal, statistics and settings. Anything that acts on
 server-side state — trash retention, tag renames across every note, share links,
 statistics — calls the API directly and says plainly when it needs a connection.
 
+The rest of the API has a screen each: **journal** (any day, plus the days that
+already have an entry), **search the server** (bm25 ranking and match snippets,
+kept separate from the list's offline search so it is obvious which one needs a
+connection), **signed-in devices**, **users** for admins, and a **shared link**
+reader. Settings also carries import and export through the system file picker,
+the password change, the About line with both versions, and account closure.
+
+Two Android-specific notes. Closing an account or revoking this device's own
+session clears the cookie jar and the Room database before navigating back to
+the login screen, so nothing of the old account is left on the device. And the
+server picks an importer from the *file name*, so the display name is read out
+of the content URI (`OpenableColumns.DISPLAY_NAME`) and sent with the bytes;
+a name the server has no importer for is refused locally, with the extensions
+named, rather than coming back as an opaque 400.
+
 ### Beyond the app window
 
 - **Share sheet**: an `ACTION_SEND` `text/plain` intent becomes a new note, with
@@ -835,8 +955,8 @@ cd backend && make test     # go test -tags sqlite_fts5 ./...
 Run `go test ./...` without the tag to exercise the no-FTS5 fallback path.
 
 The frontend's pure logic — wiki links, search-snippet rendering, task toggling,
-heading extraction, the toolbar transforms and the version diff — is covered by
-52 Vitest tests:
+heading extraction, the toolbar transforms, the version diff and the About
+version line — is covered by 55 Vitest tests:
 
 ```bash
 cd frontend && npm test
@@ -844,9 +964,10 @@ cd frontend && npm test
 
 The desktop client's API layer is tested against a real HTTP server (cookie
 capture and replay, `If-Match`, the 409 body, query building, the plain-language
-network errors), alongside its settings/cache store and the pure renderer logic —
-38 Vitest tests. Its UI is covered by the driven self-test rather than a
-simulated DOM:
+network errors, the multipart uploads byte for byte, the share-password header,
+and the account/session/admin routes), alongside its settings/cache store, the
+share-link parser and the pure renderer logic — 52 Vitest tests. Its UI is
+covered by the driven self-test rather than a simulated DOM:
 
 ```bash
 cd electron && npm test && npm run selftest
@@ -856,8 +977,16 @@ The Android sync engine is the part most able to lose data, so it is tested
 against a real in-memory Room database and a real HTTP stack (MockWebServer):
 offline creation, push with `If-Match`, conflict capture and both resolutions,
 trashing local-only versus synced notes, pull deleting only what is safe to
-delete, and a failed sync preserving pending work. 24 tests in total, with DAO
-query coverage (search, tag, folder, ordering) and share-intent parsing.
+delete, and a failed sync preserving pending work. 45 tests in total, with DAO
+query coverage (search, tag, folder, ordering), share-intent parsing, the
+account/session/admin/sharing calls against MockWebServer, and the small pure
+helpers (share-token extraction, importable file names, expiry stamps, journal
+date arithmetic, snippet splitting).
+
+Retrofit validates its annotations when a call is made, not at compile time, so
+`AccountApiTest` is what catches a malformed declaration: closing an account
+needs a body on a `DELETE`, which Retrofit refuses on `@DELETE` and only allows
+through `@HTTP(method = "DELETE", hasBody = true)`.
 
 ```bash
 make test-android          # or: cd android && JAVA_HOME=… ./gradlew :app:testDebugUnitTest
@@ -921,6 +1050,40 @@ The suite talks to the API and nothing else — no database access, no fixtures
 written behind the server's back — so it tests the same surface a client uses,
 against the same image that would be deployed. It also asserts that the image was
 built with FTS5, which a plain `go build` would silently drop.
+
+### The route inventory
+
+`e2e/guards_test.go` holds the inventory: every route `buildRouter` registers,
+with whether it is public, needs a session, or needs an admin. Three things hang
+off it.
+
+1. **Counts are a tripwire.** `TestRouteInventoryIsComplete` fails when the
+   number of public, authenticated or admin routes changes, so adding an
+   endpoint to the server means adding it here.
+2. **Guards are checked route by route.** Every authenticated route is called
+   with no cookie and must answer 401; every admin route is called with a plain
+   session and must answer 403. No endpoint can quietly ship unguarded.
+3. **Coverage is enforced after the run.** The harness records the route each
+   request hit (`recordRoute`, normalising `/api/notes/12/versions/3` back to
+   `/api/notes/:id/versions/:vid`). When the suite finishes, `TestMain` fails the
+   run if any inventoried route was never called. Requests made by the guard
+   tests are excluded — bouncing off a 401 is not coverage of an endpoint — and
+   a `-run` filter stands the gate down, since that deliberately picks a subset.
+
+The tests that keep it honest are grouped by the surface they cover:
+`e2e_test.go` (health and auth, the note lifecycle, search and filters, tags,
+folders and links, templates and the journal, sharing, images and
+import/export, account isolation, statistics, the version stamp),
+`accounts_test.go` (admin user management, password change, account closure,
+sessions), `library_test.go` (the tag catalogue, folder deletion, template
+editing, journal day lookup, emptying the trash, reading a version, disabling a
+share link, paging) and `guards_test.go` (the inventory, the guard matrix,
+CORS).
+
+Destructive tests — revoking a session, changing a password, closing an account,
+emptying the trash — work on a throwaway account created through the admin API
+(`newAccount`), so they cannot disturb the shared admin login the rest of the
+suite uses, and their counts are exact rather than "at least".
 
 ## Security considerations
 

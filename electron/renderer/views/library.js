@@ -288,7 +288,178 @@ export function settingsView({ state, actions }) {
 
         h("div.card",
             h("h3", null, "Notes"),
-            h("button", { onClick: () => actions.exportZip() }, "Export all notes as .zip"),
+            h("div.row",
+                h("button", { onClick: () => actions.exportZip() }, "Export all notes as .zip"),
+                h("button", { onClick: () => actions.importNotes() }, "Import .md or .zip…"),
+            ),
+            state.importReport ? importReport(state.importReport) : null,
+        ),
+
+        h("div.card",
+            h("h3", null, "Password"),
+            h("div.row",
+                h("input", {
+                    type: "password",
+                    placeholder: "current password",
+                    value: settings.currentPassword || "",
+                    oninput: event => actions.editSetting({ currentPassword: event.target.value }),
+                }),
+                h("input", {
+                    type: "password",
+                    placeholder: "new password (min 6)",
+                    value: settings.newPassword || "",
+                    oninput: event => actions.editSetting({ newPassword: event.target.value }),
+                }),
+                h("button.primary", { onClick: () => actions.changePassword() }, "Change"),
+            ),
+        ),
+
+        h("div.card",
+            h("h3", null, "About"),
+            h("p.small.muted", null, `Desktop ${state.appVersion || "—"} · server ${state.serverVersion || "—"}`),
+        ),
+
+        h("div.card",
+            h("h3", null, "Close account"),
+            h("p.small.muted", null,
+                "This deletes the account and every note in it, on the server, for good."),
+            h("div.row",
+                h("input", {
+                    type: "password",
+                    placeholder: "confirm with your password",
+                    value: settings.closePassword || "",
+                    oninput: event => actions.editSetting({ closePassword: event.target.value }),
+                }),
+                h("button.danger", { onClick: () => actions.closeAccount() }, "Delete my account"),
+            ),
+        ),
+    );
+}
+
+function importReport(report) {
+    return h("div", { style: { marginTop: "8px" } },
+        h("p.small", null,
+            `Imported ${report.imported} note${report.imported === 1 ? "" : "s"}` +
+            (report.skipped?.length ? `, skipped ${report.skipped.length}` : "")),
+        ...(report.skipped || []).slice(0, 8).map(skip =>
+            h("p.small.muted", null, `${skip.name}: ${skip.reason}`)),
+    );
+}
+
+export function sessionsView({ state, actions }) {
+    const sessions = state.sessions || [];
+
+    return pane("Sessions", [h("button", { onClick: () => actions.loadSessions() }, "Refresh")],
+        state.message ? h("div.banner.info", null, state.message) : null,
+        state.error ? h("div.banner.error", null, state.error) : null,
+
+        h("p.small.muted", null,
+            "Every browser, phone and computer signed in to this account. Revoking one signs it out."),
+
+        sessions.length === 0
+            ? h("div.empty", "No sessions listed.")
+            : sessions.map(item => h("div.card",
+                h("div.row",
+                    h("strong", null, item.isCurrent ? "This computer" : `Session ${item.id}`),
+                    item.isCurrent ? h("span.chip", null, "current") : null,
+                    h("span.spacer"),
+                    h("button.danger", { onClick: () => actions.revokeSession(item) },
+                        item.isCurrent ? "Sign out here" : "Revoke"),
+                ),
+                h("p.small.muted", null,
+                    `Signed in ${formatStamp(item.createdAt)} · expires ${formatStamp(item.expiresAt)}`),
+            )),
+    );
+}
+
+export function usersView({ state, actions }) {
+    const users = state.users || [];
+    const draft = state.userDraft || {};
+
+    return pane("Users", [h("button", { onClick: () => actions.loadUsers() }, "Refresh")],
+        state.message ? h("div.banner.info", null, state.message) : null,
+        state.error ? h("div.banner.error", null, state.error) : null,
+
+        h("div.card",
+            h("h3", null, "Add a user"),
+            h("div.row",
+                h("input", {
+                    placeholder: "email",
+                    value: draft.email || "",
+                    oninput: event => actions.editUserDraft({ email: event.target.value }),
+                }),
+                h("input", {
+                    type: "password",
+                    placeholder: "password (min 6)",
+                    value: draft.password || "",
+                    oninput: event => actions.editUserDraft({ password: event.target.value }),
+                }),
+                h("label.row.small",
+                    h("input", {
+                        type: "checkbox",
+                        checked: Boolean(draft.isAdmin),
+                        onchange: event => actions.editUserDraft({ isAdmin: event.target.checked }),
+                    }),
+                    "admin",
+                ),
+                h("button.primary", { onClick: () => actions.createUser() }, "Create"),
+            ),
+        ),
+
+        users.length === 0
+            ? h("div.empty", "No users listed.")
+            : users.map(user => h("div.card",
+                h("div.row",
+                    h("strong", null, user.email),
+                    user.isAdmin ? h("span.chip", null, "admin") : null,
+                    user.id === state.me?.userId ? h("span.chip", null, "you") : null,
+                    h("span.spacer"),
+                    h("button", { onClick: () => actions.toggleUserAdmin(user) },
+                        user.isAdmin ? "Remove admin" : "Make admin"),
+                    h("button.danger", { onClick: () => actions.deleteUser(user) }, "Delete"),
+                ),
+                h("p.small.muted", null, `Joined ${formatStamp(user.createdAt)}`),
+            )),
+    );
+}
+
+// A note someone shared by link, read without signing in as them.
+export function sharedView({ state, actions }) {
+    const shared = state.sharedNote;
+
+    return pane("Shared link", [],
+        state.error ? h("div.banner.error", null, state.error) : null,
+
+        h("div.card",
+            h("h3", null, "Open a link someone sent you"),
+            h("div.row",
+                h("input", {
+                    style: { flex: "1" },
+                    placeholder: "share link or token",
+                    value: state.sharedToken || "",
+                    oninput: event => actions.editShared({ sharedToken: event.target.value }),
+                }),
+                h("input", {
+                    type: "password",
+                    placeholder: "password, if it needs one",
+                    value: state.sharedPassword || "",
+                    oninput: event => actions.editShared({ sharedPassword: event.target.value }),
+                }),
+                h("button.primary", { onClick: () => actions.openSharedLink() }, "Open"),
+            ),
+        ),
+
+        shared && h("div.card",
+            h("div.row",
+                h("strong", null, shared.title || "(untitled)"),
+                h("span.spacer"),
+                h("span.small.muted", null, `Updated ${formatStamp(shared.updatedAt)}`),
+            ),
+            shared.tags
+                ? h("div.row.wrap", ...shared.tags.split(",").filter(Boolean)
+                    .map(tag => h("span.chip", null, `#${tag}`)))
+                : null,
+            previewBlock(shared.content),
         ),
     );
 }

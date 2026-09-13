@@ -26,7 +26,7 @@ import com.greynote.app.vm.TrashViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ScreenScaffold(
+internal fun ScreenScaffold(
     title: String,
     onBack: () -> Unit,
     actions: @Composable RowScope.() -> Unit = {},
@@ -49,7 +49,7 @@ private fun ScreenScaffold(
 }
 
 @Composable
-private fun Empty(text: String) {
+internal fun Empty(text: String) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
@@ -404,6 +404,19 @@ fun NoteToolsScreen(noteId: Long, onBack: () -> Unit, onOpenNote: (Long) -> Unit
                         Text("Disable", color = MaterialTheme.colorScheme.error)
                     }
                 }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { vm.expireShareIn(7) }) { Text("Expire in 7 days") }
+                    TextButton(onClick = { vm.expireShareIn(30) }) { Text("30 days") }
+                    if (state.shareExpiresAt.isNotBlank()) {
+                        TextButton(onClick = { vm.clearShareExpiry() }) { Text("Never") }
+                    }
+                }
+                Text(
+                    if (state.shareExpiresAt.isBlank()) "The link works until you disable it."
+                    else "Expires ${state.shareExpiresAt.take(16).replace("T", " ")} UTC",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 if (state.sharePasswordSet) {
                     Text("🔒 Password protected", style = MaterialTheme.typography.labelSmall)
                 }

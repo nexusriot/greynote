@@ -1,7 +1,8 @@
 "use strict";
 
-const { ipcMain, shell, dialog, clipboard } = require("electron");
+const { app, ipcMain, shell, dialog, clipboard } = require("electron");
 const fs = require("node:fs");
+const path = require("node:path");
 const { ApiError } = require("./api");
 
 /**
@@ -31,6 +32,7 @@ function registerIpc({ api, store, getWindow, onAuthChange = () => {} }) {
         quickCaptureShortcut: store.get("quickCaptureShortcut"),
         startMinimised: store.get("startMinimised"),
         hasSession: Boolean(store.get("cookie")),
+        appVersion: app.getVersion(),
     }));
 
     handle("settings:set", values => {
@@ -57,6 +59,28 @@ function registerIpc({ api, store, getWindow, onAuthChange = () => {} }) {
         onAuthChange(true);
         return me;
     });
+
+    handle("auth:changePassword", ({ currentPassword, newPassword }) =>
+        api.changePassword(currentPassword, newPassword).then(() => true));
+
+    handle("auth:sessions", () => api.sessions());
+    handle("auth:revokeSession", id => api.revokeSession(id).then(() => true));
+
+    // Closing the account ends this computer's session with it, cache included.
+    handle("auth:deleteAccount", async password => {
+        await api.deleteAccount(password);
+        store.set("cookie", null);
+        store.clearCache();
+        onAuthChange(false);
+        return true;
+    });
+
+    handle("admin:users", () => api.users());
+    handle("admin:createUser", user => api.createUser(user).then(() => true));
+    handle("admin:setAdmin", ({ id, isAdmin }) => api.setUserAdmin(id, isAdmin).then(() => true));
+    handle("admin:deleteUser", id => api.deleteUser(id).then(() => true));
+
+    handle("server:version", () => api.serverVersion());
 
     handle("auth:logout", async () => {
         await api.logout();
@@ -101,13 +125,14 @@ function registerIpc({ api, store, getWindow, onAuthChange = () => {} }) {
 
     handle("folders:list", () => api.folders());
     handle("folders:rename", ({ from, to }) => api.renameFolder(from, to));
-    handle("folders:delete", path => api.deleteFolder(path));
+    handle("folders:delete", folderPath => api.deleteFolder(folderPath));
 
     handle("templates:list", () => api.templates());
     handle("templates:save", template => api.saveTemplate(template));
     handle("templates:delete", id => api.deleteTemplate(id).then(() => true));
     handle("templates:apply", ({ id, title, date }) => api.applyTemplate(id, { title, date }));
 
+    handle("daily:get", date => api.dailyNote(date));
     handle("daily:open", date => api.openDaily(date));
     handle("daily:list", () => api.dailyEntries());
     handle("stats:get", () => api.stats());
@@ -115,6 +140,8 @@ function registerIpc({ api, store, getWindow, onAuthChange = () => {} }) {
     handle("share:enable", ({ id, expiresAt }) => api.enableShare(id, expiresAt));
     handle("share:disable", id => api.disableShare(id).then(() => true));
     handle("share:password", ({ id, password }) => api.setSharePassword(id, password).then(() => true));
+    handle("share:expiry", ({ id, expiresAt }) => api.setShareExpiry(id, expiresAt).then(() => true));
+    handle("share:read", ({ token, password }) => api.sharedNote(shareToken(token), password));
 
     // ---- desktop-only conveniences ---------------------------------------
 
@@ -144,6 +171,43 @@ function registerIpc({ api, store, getWindow, onAuthChange = () => {} }) {
         return { saved: true, path: filePath };
     });
 
+    handle("desktop:importNotes", async () => {
+        const window = getWindow();
+        const { canceled, filePaths } = await dialog.showOpenDialog(window, {
+            title: "Import notes",
+            properties: ["openFile"],
+            filters: [{ name: "Notes", extensions: ["zip", "md", "markdown"] }],
+        });
+        if (canceled || filePaths.length === 0) return { cancelled: true };
+
+        const file = filePaths[0];
+        const result = await api.importNotes(path.basename(file), fs.readFileSync(file));
+        return { cancelled: false, ...result };
+    });
+
+    handle("desktop:insertImage", async () => {
+        const window = getWindow();
+        const { canceled, filePaths } = await dialog.showOpenDialog(window, {
+            title: "Insert an image",
+            properties: ["openFile"],
+            filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }],
+        });
+        if (canceled || filePaths.length === 0) return { cancelled: true };
+
+        const file = filePaths[0];
+        const uploaded = await api.uploadImage(path.basename(file), fs.readFileSync(file), imageType(file));
+        return { cancelled: false, ...uploaded, name: path.basename(file) };
+    });
+
+    // The clipboard route is the one people reach for after a screenshot.
+    handle("desktop:pasteImage", async () => {
+        const image = clipboard.readImage();
+        if (image.isEmpty()) throw new Error("There is no image on the clipboard");
+
+        const uploaded = await api.uploadImage("pasted.png", image.toPNG(), "image/png");
+        return { cancelled: false, ...uploaded, name: "pasted image" };
+    });
+
     handle("desktop:saveNoteAs", async ({ title, content }) => {
         const window = getWindow();
         const { canceled, filePath } = await dialog.showSaveDialog(window, {
@@ -158,4 +222,20 @@ function registerIpc({ api, store, getWindow, onAuthChange = () => {} }) {
     });
 }
 
-module.exports = { registerIpc };
+/** Accepts a whole share URL as readily as a bare token. */
+function shareToken(value) {
+    const text = String(value ?? "").trim();
+    const match = text.match(/\/(?:share|api\/share)\/([^/?#]+)/);
+    return match ? match[1] : text;
+}
+
+function imageType(file) {
+    switch (path.extname(file).toLowerCase()) {
+        case ".png": return "image/png";
+        case ".gif": return "image/gif";
+        case ".webp": return "image/webp";
+        default: return "image/jpeg";
+    }
+}
+
+module.exports = { registerIpc, shareToken };

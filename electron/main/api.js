@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const http = require("node:http");
 const https = require("node:https");
 const { URL } = require("node:url");
@@ -47,21 +48,26 @@ class ApiClient {
 
     /**
      * @param {string} path e.g. /api/notes
-     * @param {{method?: string, body?: any, headers?: object, raw?: boolean}} [options]
+     * @param {{method?: string, body?: any, headers?: object, raw?: boolean,
+     *          rawBody?: Buffer, contentType?: string}} [options]
+     *   body is sent as JSON; rawBody is sent as given (file uploads), and then
+     *   contentType says what it is.
      */
     request(path, options = {}) {
-        const { method = "GET", body, headers = {}, raw = false } = options;
+        const { method = "GET", body, headers = {}, raw = false, rawBody, contentType } = options;
         if (!this.baseUrl) {
             return Promise.reject(new ApiError("No server address is set", 0, null));
         }
 
         const url = new URL(path, this.baseUrl + "/");
         const transport = url.protocol === "https:" ? https : http;
-        const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
+        const payload = rawBody !== undefined
+            ? rawBody
+            : body === undefined ? null : Buffer.from(JSON.stringify(body));
 
         const requestHeaders = { Accept: "application/json", ...headers };
         if (payload) {
-            requestHeaders["Content-Type"] = "application/json";
+            requestHeaders["Content-Type"] = contentType || "application/json";
             requestHeaders["Content-Length"] = payload.length;
         }
         if (this.cookie) requestHeaders["Cookie"] = this.cookie;
@@ -293,6 +299,97 @@ class ApiClient {
 
     exportZip() {
         return this.request("/api/notes/export", { raw: true });
+    }
+
+    /** POSTs one file as multipart/form-data: images and the import archive. */
+    uploadFile(path, { field = "file", filename, buffer, contentType }) {
+        const boundary = `----greynote${crypto.randomBytes(12).toString("hex")}`;
+        const head = Buffer.from(
+            `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="${field}"; filename="${filename}"\r\n` +
+            `Content-Type: ${contentType || "application/octet-stream"}\r\n\r\n`,
+        );
+        const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+
+        return this.json(path, {
+            method: "POST",
+            rawBody: Buffer.concat([head, buffer, tail]),
+            contentType: `multipart/form-data; boundary=${boundary}`,
+        });
+    }
+
+    uploadImage(filename, buffer, contentType) {
+        return this.uploadFile("/api/images", { filename, buffer, contentType });
+    }
+
+    importNotes(filename, buffer) {
+        return this.uploadFile("/api/notes/import", { filename, buffer, contentType: "application/octet-stream" });
+    }
+
+    /** The day's journal entry, or a 404 when that day has none. */
+    dailyNote(date) {
+        return this.json(`/api/notes/daily${date ? `?date=${encodeURIComponent(date)}` : ""}`);
+    }
+
+    setShareExpiry(id, expiresAt) {
+        return this.request(`/api/notes/${id}/share/expiry`, {
+            method: "PUT",
+            body: { expiresAt: expiresAt || "" },
+        });
+    }
+
+    /**
+     * Reads a note someone shared. The link is the credential, so this is the
+     * one call that deliberately carries no session.
+     */
+    sharedNote(token, password = "") {
+        return this.json(`/api/share/${encodeURIComponent(token)}`, {
+            headers: password ? { "X-Share-Password": password } : {},
+        });
+    }
+
+    // ---- account and sessions ---------------------------------------------
+
+    changePassword(currentPassword, newPassword) {
+        return this.request("/api/account/password", {
+            method: "PUT",
+            body: { currentPassword, newPassword },
+        });
+    }
+
+    deleteAccount(password) {
+        return this.request("/api/account", { method: "DELETE", body: { password } });
+    }
+
+    sessions() {
+        return this.json("/api/sessions");
+    }
+
+    revokeSession(id) {
+        return this.request(`/api/sessions/${id}`, { method: "DELETE" });
+    }
+
+    // ---- administration ---------------------------------------------------
+
+    users() {
+        return this.json("/api/admin/users");
+    }
+
+    createUser({ email, password, isAdmin = false }) {
+        return this.request("/api/admin/users", { method: "POST", body: { email, password, isAdmin } });
+    }
+
+    setUserAdmin(id, isAdmin) {
+        return this.request(`/api/admin/users/${id}/admin`, { method: "PUT", body: { isAdmin } });
+    }
+
+    deleteUser(id) {
+        return this.request(`/api/admin/users/${id}`, { method: "DELETE" });
+    }
+
+    /** The server's own version, shown next to the app's in Settings. */
+    serverVersion() {
+        return this.json("/api/version");
     }
 }
 

@@ -135,6 +135,21 @@ function sharePanel({ state, actions }) {
                     h("button.danger", { onClick: () => actions.disableShare() }, "Disable"),
                 ),
                 state.note.sharePasswordSet ? h("p.small.muted", null, "🔒 Password protected") : null,
+                h("div.row", { style: { marginTop: "6px" } },
+                    h("input", {
+                        type: "datetime-local",
+                        title: "Stop the link working after this moment",
+                        value: state.shareExpiry || "",
+                        oninput: event => actions.editShareExpiry(event.target.value),
+                    }),
+                    h("button", { onClick: () => actions.saveShareExpiry() }, "Set expiry"),
+                    state.note.shareExpiresAt
+                        ? h("button", { onClick: () => actions.clearShareExpiry() }, "Never expire")
+                        : null,
+                ),
+                state.note.shareExpiresAt
+                    ? h("p.small.muted", null, `Expires ${formatStamp(state.note.shareExpiresAt)}`)
+                    : h("p.small.muted", null, "No expiry — the link works until you disable it."),
             )
             : h("button", { onClick: () => actions.enableShare() }, "Create share link"),
     );
@@ -194,6 +209,10 @@ export function editorPane({ state, actions }) {
                 state.preview ? "Edit" : "Preview"),
             h("button", { onClick: () => actions.setSplit(!state.split) },
                 state.split ? "Single pane" : "Split"),
+            h("button", { title: "Upload an image file and link it here", onClick: () => actions.insertImage() },
+                "Image…"),
+            h("button", { title: "Upload the image on the clipboard", onClick: () => actions.pasteImage() },
+                "Paste image"),
             h("span.spacer"),
             h("button", { onClick: () => actions.saveNoteAs() }, "Save as…"),
             h("button.danger", { onClick: () => actions.trashNote() }, "Delete"),

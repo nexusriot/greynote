@@ -68,6 +68,9 @@ export function sidebar({ state, actions }) {
         navItem("tags", "Tags & folders"),
         navItem("trash", "Trash"),
         navItem("stats", "Statistics"),
+        navItem("shared", "Shared link"),
+        navItem("sessions", "Sessions"),
+        state.me?.isAdmin ? navItem("users", "Users") : null,
         navItem("settings", "Settings"),
 
         state.folders.length > 0 && h("div.sidebar-heading", "Folders"),

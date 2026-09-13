@@ -2,6 +2,7 @@ import { h, mount } from "./lib/dom.js";
 import {
     createState,
     draftFrom,
+    insertSnippet,
     isDirty,
     listFilters,
     localDate,
@@ -9,7 +10,17 @@ import {
 import { toggleTaskAtLine } from "./lib/markdown.js";
 import { noteList, sidebar } from "./views/notes.js";
 import { editorPane } from "./views/editor.js";
-import { dailyView, settingsView, statsView, tagsView, templatesView, trashView } from "./views/library.js";
+import {
+    dailyView,
+    sessionsView,
+    settingsView,
+    sharedView,
+    statsView,
+    tagsView,
+    templatesView,
+    trashView,
+    usersView,
+} from "./views/library.js";
 
 const api = window.greynote;
 const store = createState({ view: "loading", split: false });
@@ -86,6 +97,8 @@ const actions = {
         if (view === "stats") actions.loadStats();
         if (view === "daily") actions.loadDaily();
         if (view === "settings") actions.loadSettings();
+        if (view === "sessions") actions.loadSessions();
+        if (view === "users") actions.loadUsers();
     },
 
     setTag(tag) {
@@ -301,6 +314,94 @@ const actions = {
         flash(password.trim() ? "Password set" : "Password removed");
     },
 
+    editShareExpiry(value) {
+        store.set({ shareExpiry: value });
+    },
+
+    /** The picker speaks local time; the server wants RFC3339. */
+    async saveShareExpiry() {
+        const state = store.get();
+        const value = (state.shareExpiry || "").trim();
+        if (!value) {
+            store.set({ error: "Pick a date and time first" });
+            return;
+        }
+        const when = new Date(value);
+        if (Number.isNaN(when.getTime())) {
+            store.set({ error: "That date could not be read" });
+            return;
+        }
+        if (!unwrap(await api.share.setExpiry(state.note.id, when.toISOString()))) return;
+        store.set({ note: { ...state.note, shareExpiresAt: when.toISOString() } });
+        flash("Expiry set");
+    },
+
+    async clearShareExpiry() {
+        const state = store.get();
+        if (!unwrap(await api.share.setExpiry(state.note.id, ""))) return;
+        store.set({ note: { ...state.note, shareExpiresAt: "" }, shareExpiry: "" });
+        flash("The link no longer expires");
+    },
+
+    editShared(patch) {
+        store.set(patch);
+    },
+
+    async openSharedLink() {
+        const state = store.get();
+        const token = (state.sharedToken || "").trim();
+        if (!token) {
+            store.set({ error: "Paste a share link or token first" });
+            return;
+        }
+
+        const result = await api.share.read(token, state.sharedPassword || "");
+        if (!result.ok) {
+            store.set({
+                sharedNote: null,
+                error: result.status === 401
+                    ? "That link is password protected — enter its password"
+                    : result.error,
+            });
+            return;
+        }
+        store.set({ sharedNote: result.data, error: null });
+    },
+
+    // ---- images ------------------------------------------------------------
+
+    async insertImage() {
+        actions.attachImage(await api.desktop.insertImage());
+    },
+
+    async pasteImage() {
+        actions.attachImage(await api.desktop.pasteImage());
+    },
+
+    /** Puts the uploaded image's markdown where the cursor is. */
+    attachImage(result) {
+        const uploaded = unwrap(result);
+        if (!uploaded || uploaded.cancelled) return;
+
+        const state = store.get();
+        const markdown = `![${uploaded.name || "image"}](${uploaded.url})`;
+        const textarea = document.getElementById("editor-textarea");
+        const content = state.draft?.content ?? "";
+
+        const at = textarea ? textarea.selectionStart : content.length;
+        const to = textarea ? textarea.selectionEnd : content.length;
+        const { content: next, caret } = insertSnippet(content, at, to, markdown);
+
+        actions.editDraft({ content: next });
+        if (textarea) {
+            requestAnimationFrame(() => {
+                textarea.focus();
+                textarea.setSelectionRange(caret, caret);
+            });
+        }
+        flash("Image uploaded");
+    },
+
     async copyShareLink() {
         const state = store.get();
         const settings = state.settings || unwrap(await api.settings.get(), { silent: true }) || {};
@@ -461,12 +562,12 @@ const actions = {
         const date = state.dailyDate || localDate();
         store.set({ dailyDate: date });
 
-        const [entries, note] = await Promise.all([api.daily.list(), api.notes.search("", 1)]);
-        store.set({ dailyEntries: unwrap(entries, { silent: true }) || [] });
-        void note;
-
-        const match = (store.get().dailyEntries || []).find(entry => entry.date === date);
-        store.set({ dailyNote: match ? unwrap(await api.notes.get(match.id), { silent: true }) : null });
+        const [entries, day] = await Promise.all([api.daily.list(), api.daily.get(date)]);
+        store.set({
+            dailyEntries: unwrap(entries, { silent: true }) || [],
+            // A day with no entry answers 404, which is an answer and not an error.
+            dailyNote: day.ok ? day.data : null,
+        });
     },
 
     setDailyDate(date) {
@@ -494,7 +595,109 @@ const actions = {
     },
 
     async loadSettings() {
-        store.set({ settings: unwrap(await api.settings.get()) || {} });
+        const [settings, version] = await Promise.all([api.settings.get(), api.server.version()]);
+        const current = unwrap(settings) || {};
+        store.set({
+            settings: current,
+            appVersion: current.appVersion,
+            // A server that cannot be reached is worth saying out loud here.
+            serverVersion: version.ok ? version.data.version : "unreachable",
+        });
+    },
+
+    async changePassword() {
+        const settings = store.get().settings || {};
+        const current = settings.currentPassword || "";
+        const next = settings.newPassword || "";
+        if (next.length < 6) {
+            store.set({ error: "The new password needs at least 6 characters" });
+            return;
+        }
+        if (!unwrap(await api.auth.changePassword(current, next))) return;
+
+        store.set({ settings: { ...settings, currentPassword: "", newPassword: "" } });
+        flash("Password changed");
+    },
+
+    async closeAccount() {
+        const settings = store.get().settings || {};
+        const password = settings.closePassword || "";
+        if (!password) {
+            store.set({ error: "Confirm with your password to close the account" });
+            return;
+        }
+        if (!confirm("Delete this account and every note in it? This cannot be undone.")) return;
+        if (!unwrap(await api.auth.deleteAccount(password))) return;
+
+        store.set({ view: "login", me: null, notes: [], note: null, draft: null, settings: {} });
+    },
+
+    async importNotes() {
+        const result = unwrap(await api.desktop.importNotes());
+        if (!result || result.cancelled) return;
+
+        store.set({ importReport: result });
+        flash(`Imported ${result.imported} note${result.imported === 1 ? "" : "s"}`);
+        await actions.refresh();
+    },
+
+    // ---- sessions ----------------------------------------------------------
+
+    async loadSessions() {
+        store.set({ sessions: unwrap(await api.auth.sessions()) || [] });
+    },
+
+    async revokeSession(item) {
+        const here = item.isCurrent;
+        if (here && !confirm("Sign this computer out?")) return;
+        if (!unwrap(await api.auth.revokeSession(item.id))) return;
+
+        if (here) {
+            store.set({ view: "login", me: null, notes: [], note: null, draft: null });
+            return;
+        }
+        flash("Session revoked");
+        actions.loadSessions();
+    },
+
+    // ---- users (admin) -----------------------------------------------------
+
+    async loadUsers() {
+        store.set({ users: unwrap(await api.admin.users()) || [] });
+    },
+
+    editUserDraft(patch) {
+        store.set({ userDraft: { ...(store.get().userDraft || {}), ...patch } });
+    },
+
+    async createUser() {
+        const draft = store.get().userDraft || {};
+        if (!draft.email || (draft.password || "").length < 6) {
+            store.set({ error: "An email and a password of at least 6 characters are required" });
+            return;
+        }
+        if (!unwrap(await api.admin.createUser({
+            email: draft.email,
+            password: draft.password,
+            isAdmin: Boolean(draft.isAdmin),
+        }))) return;
+
+        store.set({ userDraft: {} });
+        flash("User created");
+        actions.loadUsers();
+    },
+
+    async toggleUserAdmin(user) {
+        if (!unwrap(await api.admin.setAdmin(user.id, !user.isAdmin))) return;
+        actions.loadUsers();
+    },
+
+    async deleteUser(user) {
+        if (!confirm(`Delete ${user.email} and all of their notes?`)) return;
+        if (!unwrap(await api.admin.deleteUser(user.id))) return;
+
+        flash("User deleted");
+        actions.loadUsers();
     },
 
     editSetting(patch) {
@@ -627,6 +830,9 @@ function render(state) {
         templates: () => templatesView({ state, actions }),
         daily: () => dailyView({ state, actions }),
         stats: () => statsView({ state, actions }),
+        shared: () => sharedView({ state, actions }),
+        sessions: () => sessionsView({ state, actions }),
+        users: () => usersView({ state, actions }),
         settings: () => settingsView({ state, actions }),
     };
 
@@ -658,6 +864,11 @@ api.onCommand(command => {
         case "view-tags": actions.setView("tags"); break;
         case "view-trash": actions.setView("trash"); break;
         case "view-stats": actions.setView("stats"); break;
+        case "view-sessions": actions.setView("sessions"); break;
+        case "view-users": actions.setView("users"); break;
+        case "view-shared": actions.setView("shared"); break;
+        case "import": actions.importNotes(); break;
+        case "insert-image": actions.insertImage(); break;
         case "view-settings": actions.setView("settings"); break;
         default: break;
     }

@@ -117,6 +117,22 @@ export function splitSnippet(snippet) {
     return out.filter(part => part.text !== "");
 }
 
+/**
+ * Replaces the editor's selection with a snippet, padding it so an image or a
+ * link never ends up glued to the word in front of it.
+ */
+export function insertSnippet(content, start, end, snippet) {
+    const text = content ?? "";
+    const from = Math.max(0, Math.min(start ?? text.length, text.length));
+    const to = Math.max(from, Math.min(end ?? from, text.length));
+
+    const before = text.slice(0, from);
+    const after = text.slice(to);
+    const lead = before === "" || /[\s>(]$/.test(before) ? "" : " ";
+
+    return { content: before + lead + snippet + after, caret: from + lead.length + snippet.length };
+}
+
 /** YYYY-MM-DD in the user's own timezone — the journal is a local-day concept. */
 export function localDate(date = new Date()) {
     return date.toLocaleDateString("en-CA");

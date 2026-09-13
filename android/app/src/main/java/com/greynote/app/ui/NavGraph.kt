@@ -24,6 +24,11 @@ private const val TAGS = "tags"
 private const val TEMPLATES = "templates"
 private const val STATS = "stats"
 private const val SETTINGS = "settings"
+private const val SESSIONS = "sessions"
+private const val USERS = "users"
+private const val SHARED = "shared"
+private const val JOURNAL = "journal"
+private const val SERVER_SEARCH = "server-search"
 
 private fun noteEdit(id: Long) = "note/$id"
 private fun noteTools(id: Long) = "note/$id/tools"
@@ -74,6 +79,8 @@ fun NavGraph(pending: PendingAction? = null, onPendingHandled: () -> Unit = {}) 
                 onOpenTemplates = { nav.navigate(TEMPLATES) },
                 onOpenStats = { nav.navigate(STATS) },
                 onOpenSettings = { nav.navigate(SETTINGS) },
+                onOpenJournal = { nav.navigate(JOURNAL) },
+                onOpenServerSearch = { nav.navigate(SERVER_SEARCH) },
                 notesVm = notesVm,
                 authVm = authVm,
             )
@@ -112,6 +119,35 @@ fun NavGraph(pending: PendingAction? = null, onPendingHandled: () -> Unit = {}) 
             )
         }
         composable(STATS) { StatsScreen(onBack = { nav.popBackStack() }) }
-        composable(SETTINGS) { SettingsScreen(onBack = { nav.popBackStack() }) }
+        composable(SETTINGS) {
+            SettingsScreen(
+                onBack = { nav.popBackStack() },
+                onOpenSessions = { nav.navigate(SESSIONS) },
+                onOpenUsers = { nav.navigate(USERS) },
+                onOpenShared = { nav.navigate(SHARED) },
+                // Closing the account leaves nothing to come back to.
+                onAccountClosed = { nav.navigate(LOGIN) { popUpTo(0) { inclusive = true } } },
+            )
+        }
+        composable(SESSIONS) {
+            SessionsScreen(
+                onBack = { nav.popBackStack() },
+                onSignedOut = { nav.navigate(LOGIN) { popUpTo(0) { inclusive = true } } },
+            )
+        }
+        composable(USERS) { AdminUsersScreen(onBack = { nav.popBackStack() }) }
+        composable(JOURNAL) {
+            JournalScreen(
+                onBack = { nav.popBackStack() },
+                onOpenNote = { id -> nav.navigate(noteEdit(id)) },
+            )
+        }
+        composable(SERVER_SEARCH) {
+            ServerSearchScreen(
+                onBack = { nav.popBackStack() },
+                onOpenNote = { id -> nav.navigate(noteEdit(id)) },
+            )
+        }
+        composable(SHARED) { SharedNoteScreen(onBack = { nav.popBackStack() }) }
     }
 }

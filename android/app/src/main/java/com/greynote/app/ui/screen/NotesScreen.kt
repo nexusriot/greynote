@@ -35,6 +35,8 @@ fun NotesScreen(
     onOpenTemplates: () -> Unit,
     onOpenStats: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenJournal: () -> Unit = {},
+    onOpenServerSearch: () -> Unit = {},
     notesVm: NotesViewModel = viewModel(),
     authVm: AuthViewModel = viewModel(),
 ) {
@@ -78,6 +80,14 @@ fun NotesScreen(
                         DropdownMenuItem(text = { Text("Journal — today") }, onClick = {
                             menuOpen = false
                             notesVm.openToday(onOpenNote)
+                        })
+                        DropdownMenuItem(text = { Text("Journal — any day") }, onClick = {
+                            menuOpen = false
+                            onOpenJournal()
+                        })
+                        DropdownMenuItem(text = { Text("Search the server") }, onClick = {
+                            menuOpen = false
+                            onOpenServerSearch()
                         })
                         DropdownMenuItem(text = { Text("Templates") }, onClick = { menuOpen = false; onOpenTemplates() })
                         DropdownMenuItem(text = { Text("Tags & folders") }, onClick = { menuOpen = false; onOpenTags() })

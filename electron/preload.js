@@ -18,6 +18,20 @@ contextBridge.exposeInMainWorld("greynote", {
         me: () => invoke("auth:me"),
         login: (email, password) => invoke("auth:login", { email, password }),
         logout: () => invoke("auth:logout"),
+        changePassword: (currentPassword, newPassword) =>
+            invoke("auth:changePassword", { currentPassword, newPassword }),
+        deleteAccount: password => invoke("auth:deleteAccount", password),
+        sessions: () => invoke("auth:sessions"),
+        revokeSession: id => invoke("auth:revokeSession", id),
+    },
+    admin: {
+        users: () => invoke("admin:users"),
+        createUser: user => invoke("admin:createUser", user),
+        setAdmin: (id, isAdmin) => invoke("admin:setAdmin", { id, isAdmin }),
+        deleteUser: id => invoke("admin:deleteUser", id),
+    },
+    server: {
+        version: () => invoke("server:version"),
     },
     notes: {
         list: filters => invoke("notes:list", filters),
@@ -56,6 +70,7 @@ contextBridge.exposeInMainWorld("greynote", {
         apply: (id, options) => invoke("templates:apply", { id, ...(options || {}) }),
     },
     daily: {
+        get: date => invoke("daily:get", date),
         open: date => invoke("daily:open", date),
         list: () => invoke("daily:list"),
     },
@@ -66,11 +81,16 @@ contextBridge.exposeInMainWorld("greynote", {
         enable: (id, expiresAt) => invoke("share:enable", { id, expiresAt }),
         disable: id => invoke("share:disable", id),
         setPassword: (id, password) => invoke("share:password", { id, password }),
+        setExpiry: (id, expiresAt) => invoke("share:expiry", { id, expiresAt }),
+        read: (token, password) => invoke("share:read", { token, password }),
     },
     desktop: {
         copy: text => invoke("desktop:copy", text),
         openExternal: url => invoke("desktop:openExternal", url),
         exportZip: () => invoke("desktop:exportZip"),
+        importNotes: () => invoke("desktop:importNotes"),
+        insertImage: () => invoke("desktop:insertImage"),
+        pasteImage: () => invoke("desktop:pasteImage"),
         saveNoteAs: (title, content) => invoke("desktop:saveNoteAs", { title, content }),
     },
     // Menu items, the tray and the global hotkey all arrive here.
