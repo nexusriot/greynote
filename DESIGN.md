@@ -1020,6 +1020,36 @@ knowledge that otherwise bite:
   newest: reaching for the newest lands on a milestone build the Android plugin
   refuses.
 
+### What is not in the repository
+
+Three directories in the root are runtime, not source: `data/` (the compose
+volume holding `notes.db` and the uploaded images), and `images/` plus
+`backend/images/`, which appear when the binary runs outside Docker because
+`IMAGES_DIR` defaults to a sibling of the database. All three are ignored by an
+**anchored** path, and the anchoring is the whole point: `data` is also a Kotlin
+package name (`com.greynote.app.data`), and an unanchored `data/` rule once
+ignored the Android source package silently — git reports nothing when a rule
+swallows a file, so the mistake only surfaces as a class missing from a fresh
+clone.
+
+`scripts/check-gitignore.sh` (`make check-ignore`, part of `make test`) turns
+that lesson into a check. It is pure git, so it costs a second:
+
+1. `git ls-files -i -c` — no tracked file may match an ignore rule. This is the
+   check that catches the mistake the moment it is made, while the file is still
+   in the index.
+2. `git check-ignore` against a list of source paths, including one that does
+   not exist yet, so "could I add a file here?" is answered too.
+3. The same, inverted, for build and runtime output: the binary, both `.deb`
+   staging trees, `node_modules`, the Gradle output, the databases and upload
+   directories, the keystores and `.env`.
+4. A warning for anything in the tree that is neither tracked nor ignored.
+
+The container build contexts are narrowed the same way: `backend/.dockerignore`
+and `frontend/.dockerignore` keep a locally built binary, a stray `notes.db` or
+an `images/` directory out of the image. The contexts are `./backend` and
+`./frontend`, so the root `data/` is never in one to begin with.
+
 Both `.deb` packages are assembled by hand with `dpkg-deb` under `fakeroot`,
 which keeps the build free of a packaging framework:
 

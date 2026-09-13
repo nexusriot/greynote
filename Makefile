@@ -57,8 +57,12 @@ docker: ## Build the server container image
 # ------------------------------------------------------------------- test ---
 
 .PHONY: test
-test: test-backend test-frontend test-desktop ## Run every unit suite that needs no device
+test: check-ignore test-backend test-frontend test-desktop ## Run every unit suite that needs no device
 	@echo "all unit suites passed"
+
+.PHONY: check-ignore
+check-ignore: ## Check .gitignore covers the build output and nothing else
+	@scripts/check-gitignore.sh
 
 .PHONY: test-backend
 test-backend: ## Go tests, with and without the FTS5 build tag

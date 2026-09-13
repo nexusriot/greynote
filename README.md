@@ -241,6 +241,13 @@ poking at.
 
 ## Development
 
+`make test` runs every unit suite, starting with `make check-ignore` — a
+one-second git-only check that `.gitignore` covers the build output and the
+runtime directories (`data/`, `images/`, `backend/images/`) and *only* those.
+The runtime rules are anchored to the repo root on purpose: `data` is also a
+Kotlin package name, and an unanchored `data/` rule once ignored the Android
+source package without a word of warning.
+
 The backend needs the `sqlite_fts5` build tag for the search index; the `Makefile` applies it:
 
 ```bash

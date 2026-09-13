@@ -1,0 +1,14 @@
+# The image is compiled from source in the build stage, so nothing a local run
+# or build leaves behind belongs in the context (frontend/.dockerignore does the
+# same for the web client).
+greynote
+server
+*.exe
+*.test
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+images/
+.dockerignore
