@@ -52,6 +52,3 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
-
-volumes:
-  notes_data:

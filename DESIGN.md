@@ -2,7 +2,7 @@
 
 ## Overview
 
-GreyNote is a self-hosted note-taking app built for simplicity and self-containment. The entire system is two Docker containers: a Go HTTP server and a Vite dev server. All persistent state lives in a single SQLite file. No external services, no message queues, no caches.
+GreyNote is a self-hosted note-taking app built for simplicity and self-containment. The deployment is two Docker containers — a Go HTTP server and a Vite dev server — and all persistent state lives in a single SQLite file. No external services, no message queues, no caches. Two further clients, an Electron desktop app and a native Android app, are separate front ends over the same REST API; see *Client parity*.
 
 ---
 
@@ -71,6 +71,7 @@ frontend/src/
   markdown.js          — task toggling, heading extraction, slugs
   editor.js            — toolbar transforms, list continuation, indentation
   diff.js              — line diff (LCS) for version history
+  version.js           — the About line; __APP_VERSION__ is stamped in at build time
   components/
     CommandPalette.jsx — Ctrl+K overlay: fuzzy search notes, keyboard nav
     MarkdownRenderer.jsx — ReactMarkdown with copy-code button, wiki links
@@ -93,21 +94,62 @@ frontend/src/
     Settings.jsx       — Change password, delete account
     Stats.jsx          — Aggregate stats + SVG bar chart + tag usage chart
     AdminUsers.jsx     — Admin user management
-    Register.jsx       — (Admin-only user creation flow)
+    Register.jsx       — dead: no route renders it, and the server registers no
+                         /api/register route (accounts are created by an admin)
+    *.test.js          — pure logic only (wiki links, markdown, editor, diff)
 
 android/app/src/main/java/com/greynote/app/
-  MainActivity.kt      — Compose entry point, sets up NavGraph
+  MainActivity.kt      — Compose entry point; hands a PendingAction to NavGraph
+  PendingAction.kt     — a share or widget action, consumed once after sign-in
+  Graph.kt             — service locator: the repository and the preferences
   api/
-    ApiService.kt      — Retrofit interface (login, logout, me, notes CRUD, pin)
+    ApiService.kt      — Retrofit interface: every endpoint the server exposes
     ApiClient.kt       — OkHttp + Retrofit factory, PersistentCookieJar
     model/             — Auth.kt, Note.kt request/response DTOs
-  data/Prefs.kt        — SharedPreferences: server URL persistence
+  data/
+    NotesRepository.kt — the offline store and the sync engine
+    Prefs.kt           — server URL, app lock, sync-on-open, last sync
+    db/                — Room: NoteEntity, NoteDao, GreyNoteDatabase
+  security/AppLock.kt  — biometric / device-credential gate
+  widget/              — RemoteViews quick-capture widget
   ui/
-    NavGraph.kt        — login → notes → note-edit routes
-    screen/            — LoginScreen, NotesScreen, NoteEditScreen
+    NavGraph.kt        — login, notes, editor, note tools, and one route per
+                         library screen (trash, tags, templates, stats,
+                         journal, server search, sessions, users, shared link)
+    screen/            — LoginScreen, NotesScreen, NoteEditScreen,
+                         LibraryScreens, AccountScreens, JournalScreen,
+                         ServerSearchScreen, SettingsScreen
     component/         — MarkdownText (Compose markdown rendering)
     theme/             — Color, Theme, Type
-  vm/                  — AuthViewModel, NotesViewModel, NoteEditViewModel
+  vm/                  — Auth / Notes / NoteEdit / NoteTools / Settings /
+                         Library / Journal / ServerSearch / Account view models
+
+electron/
+  main/
+    main.js            — app lifecycle, window, menu, tray, quick-capture hotkey
+    api.js             — the HTTP client: every endpoint, plus the session cookie
+    ipc.js             — the channels the renderer may use, and the file dialogs
+    store.js           — settings.json and the offline note cache in userData
+  preload.js           — the only surface the renderer gets (window.greynote)
+  renderer/
+    app.js             — actions, state, the view switch
+    lib/               — dom (h/mount), state, markdown (marked + DOMPurify)
+    views/             — notes, editor, library (incl. sessions, users, shared)
+  build.js             — esbuild bundle step
+  test/                — unit tests plus selftest.js, which drives the real app
+
+e2e/
+  e2e_test.go          — harness (client, throwaway accounts) and the original
+                         suites: auth, note lifecycle, search, tags, templates,
+                         sharing, images, import/export, isolation, stats
+  accounts_test.go     — admin user management, password, closure, sessions
+  library_test.go      — tag catalogue, folders, templates, journal, trash,
+                         versions, share disable, paging
+  guards_test.go       — the route inventory, the guard matrix, CORS
+  docker-compose.yml   — the server image plus the test runner, private network
+
+scripts/               — what the Makefile runs: build-*, package-deb, e2e,
+                         test-android, check-gitignore, and common.sh
 ```
 
 ---
@@ -226,7 +268,10 @@ Snapshot of a note's state taken just before each `UPDATE`. Used for version his
 | `tags` | TEXT NOT NULL DEFAULT '' | |
 | `saved_at` | TEXT NOT NULL | Copied from `notes.updated_at` at snapshot time |
 
-At most 50 versions are returned per note (newest first). Older versions are not automatically pruned — the LIMIT is on read, not on write.
+Pruned on write: after each snapshot, `pruneNoteVersions` deletes everything
+beyond the newest `MAX_NOTE_VERSIONS` (50 by default; `0` keeps every version).
+Reads are capped too — `GET /api/notes/:id/versions` returns at most that many,
+or 200 when versions are unlimited.
 
 ### `share_links`
 
@@ -254,6 +299,7 @@ All routes under `/api`. Authenticated routes require a valid session cookie; un
 |---|---|---|---|
 | POST | `/api/login` | — | Email + password → set session cookie |
 | POST | `/api/logout` | — | Delete session, clear cookie |
+| GET | `/health` | — | `ok` — for the compose healthcheck and load balancers, not for clients |
 | GET | `/api/version` | — | `{version}` — stamped in at build time, `"dev"` for a plain `go build` |
 | GET | `/api/me` | ✓ | Returns `{userId, email, isAdmin}` |
 
@@ -280,7 +326,7 @@ Route registration order matters: static segments (`/notes/export`, `/notes/stat
 | GET | `/api/notes` | ✓ | List live notes (pinned first, then by `updated_at DESC`). `?tag=a,b` filters by tag (AND), `?folder=` by folder (`&recursive=1` includes subfolders, `?folder=` alone means the root), `?limit=`/`?offset=` page, `?full=1` includes bodies. Bodies are replaced by a `snippet` unless `full=1`; the unpaged total comes back in `X-Total-Count` |
 | POST | `/api/notes` | ✓ | Create note; returns `{id}` |
 | GET | `/api/notes/export` | ✓ | Download all notes as `notes-export.zip` (front-matter markdown) |
-| GET | `/api/notes/search` | ✓ | `?q=` ranked full-text search; `?limit=` (default 50, max 200). Returns `{results, indexed}` |
+| GET | `/api/notes/search` | ✓ | `?q=` ranked full-text search; `?limit=` defaults to 50 and anything above 200 falls back to it. Returns `{results, indexed}` |
 | GET | `/api/notes/stats` | ✓ | Aggregate stats (counts, words, tags, monthly) |
 | GET | `/api/notes/trash` | ✓ | List trashed notes with `deletedAt` and `purgeAt` |
 | DELETE | `/api/notes/trash` | ✓ | Empty the trash; returns `{purged}` |
@@ -295,7 +341,7 @@ Route registration order matters: static segments (`/notes/export`, `/notes/stat
 | POST | `/api/notes/daily` | ✓ | Open today's journal entry, creating it from the daily template if needed |
 | GET | `/api/notes/daily/list` | ✓ | Days that already have an entry, newest first |
 | POST | `/api/notes/:id/pin` | ✓ | Toggle `is_pinned` |
-| GET | `/api/notes/:id/versions` | ✓ | List versions (newest first, max 50) |
+| GET | `/api/notes/:id/versions` | ✓ | List versions, newest first; capped by `MAX_NOTE_VERSIONS` (50 by default, 200 when unlimited) |
 | GET | `/api/notes/:id/versions/:vid` | ✓ | Get a specific version (full content) |
 | POST | `/api/notes/:id/share` | ✓ | Enable share link (creates if new); optional `{expiresAt}` body |
 | POST | `/api/notes/:id/share/disable` | ✓ | Disable share link (token preserved) |
@@ -358,12 +404,14 @@ All three mutations return `{notesUpdated}`.
 
 ## Client parity
 
-The web, desktop and Android clients are separate front ends over the same API,
-and every endpoint the server exposes is reachable from each of them. The table
-below is the audit: where a client reaches an endpoint, and how.
+The web, desktop and Android clients are separate front ends over the same API.
+The table below is the audit: where a client reaches an endpoint, and how.
 
-`/health` is the exception — it exists for orchestrators (the compose
-healthcheck, a load balancer), not for people, so no client calls it.
+Every endpoint is reachable from every client, with two exceptions, both noted
+in the table and explained under it: `/health`, which exists for orchestrators
+(the compose healthcheck, a load balancer) rather than for people, and
+`GET /api/images/:filename`, which only the web client fetches — the other two
+upload images but cannot yet display them inline.
 
 | Endpoint | Web | Desktop | Android |
 |---|---|---|---|
@@ -397,7 +445,7 @@ healthcheck, a load balancer), not for people, so no client calls it.
 | `GET /api/notes/:id/versions` | Editor | Editor | Note tools |
 | `GET /api/notes/:id/versions/:vid` | Editor | Editor | Note tools |
 | `GET /api/notes/daily` | Journal page | Journal view | Journal screen |
-| `POST /api/notes/daily` | Journal page | Journal view | Menu → Journal |
+| `POST /api/notes/daily` | Journal page | Journal view | Menu and Journal screen |
 | `GET /api/notes/daily/list` | Journal page | Journal view | Journal screen |
 | `GET /api/templates` | Templates page | Templates view | Templates screen |
 | `POST /api/templates` | Templates page | Templates view | Templates screen |
@@ -417,7 +465,8 @@ healthcheck, a load balancer), not for people, so no client calls it.
 | `PUT /api/notes/:id/share/expiry` | Editor | Editor | Note tools (7/30 days, never) |
 | `GET /api/share/:token` | Share page | Shared link view | Shared link screen |
 | `POST /api/images` | Editor (paste) | Editor (file or clipboard) | Editor (picker) |
-| `GET /api/images/:filename` | Markdown preview | Markdown preview | Markdown preview |
+| `GET /api/images/:filename` | Markdown preview | — (see below) | — (see below) |
+| `GET /health` | — (orchestrators only) | — | — |
 
 ### Where the clients deliberately differ
 
@@ -435,6 +484,25 @@ healthcheck, a load balancer), not for people, so no client calls it.
 - **Only the web client renders `/share/:token` as a page**, because a share
   link is a URL someone opens in a browser. The desktop and Android clients
   instead take a pasted link and read the note through the same endpoint.
+
+### Known gap: inline images outside the browser
+
+All three clients upload images, and all three write the same
+`![](/api/images/<file>)` markdown, but only the web client displays it. The web
+app is served from the same origin as the API, so the relative URL resolves; the
+other two would each need work:
+
+- **Desktop** — the renderer is a local page, so a relative `/api/images/…` URL
+  points at nothing, and its CSP (`img-src 'self' data:`) would refuse a remote
+  one. Displaying uploads means rewriting the URL against the configured server
+  and widening that CSP to exactly that origin.
+- **Android** — `MarkdownText` builds Markwon without an image plugin, so there
+  is no loader to fetch anything; it needs `markwon-image` (or Coil) plus the
+  same absolute-URL rewriting.
+
+Neither client is broken by this: an uploaded image is stored, shared and
+visible in a browser, and the markdown round-trips. It is a display gap, and the
+table says so rather than implying parity that is not there.
 
 ---
 
@@ -476,7 +544,8 @@ Every `PUT /api/notes/:id` first reads the current `{title, content, tags, updat
 
 - The version history shows what the note looked like **before** each save
 - The first version is created on the second save (nothing to snapshot on creation)
-- Version content is never compacted or deleted automatically
+- History cannot grow without bound: the same request prunes everything beyond
+  the newest `MAX_NOTE_VERSIONS` (50 by default, `0` to keep every version)
 
 ### Tags
 
@@ -735,7 +804,7 @@ No external state library. Each page fetches its own data on mount. Cross-cuttin
 - Sets `Content-Type: application/json` only when a body is provided
 - Throws on non-2xx responses; the caller handles errors
 
-Image uploads use raw `fetch` directly with `FormData` (not `apiFetch`) because `apiFetch` is JSON-only.
+`apiFetch` is JSON-only, so multipart uploads go through `uploadFile(path, file)` in the same module (used by the note import) or, in the editor, a raw `fetch` with a `FormData` body. `apiFetchWithMeta` is `apiFetch` plus the response headers, for the note list's `X-Total-Count`.
 
 ### Routing
 
@@ -762,10 +831,14 @@ The copy button uses `preRef.current.innerText` rather than traversing the React
 
 ### Command palette
 
-`CommandPalette` fetches all notes on mount and filters client-side. Matching is case-insensitive substring on title and content. Results show:
-- Title with matched characters highlighted (`<mark>`)
+`CommandPalette` loads the note list once for its idle view, then hands typing
+to the server: `GET /api/notes/search?q=…&limit=30`, so the palette ranks
+matches the same way the notes list does rather than inventing its own rule.
+Results show:
+- The title, with the typed text highlighted client-side (`<mark>`)
 - Tag chips
-- A content snippet around the first match
+- The server's match snippet through `Snippet` (a sliced body for the idle list,
+  which has no snippet to show)
 
 Keyboard: `↑`/`↓` to move selection, `Enter` to open, `Escape` to close. Click outside to close.
 
@@ -941,7 +1014,7 @@ named, rather than coming back as an opaque 400.
 
 `backend/*_test.go` drives the real router (`buildRouter`) against a temporary
 SQLite file, with a helper that creates a user and a session cookie, so tests
-exercise middleware, routing and SQL exactly as production does — 91 tests
+exercise middleware, routing and SQL exactly as production does — 92 tests
 covering search indexing across every write path and the LIKE fallback, the
 trash lifecycle and retention sweep, version pruning, image garbage collection,
 tag rename/merge/delete, folder trees and moves, templates and the one-per-day

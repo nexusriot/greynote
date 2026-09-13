@@ -13,8 +13,8 @@ A self-hosted markdown notes app. Write, organise, link, and share notes with fu
 - Word count displayed while editing
 
 **Every client, every endpoint**
-- The web, desktop and Android clients are separate front ends over one API, and each of them reaches every endpoint the server exposes — sessions, admin users, account closure, import/export, image upload, share expiry and reading someone else's share link included. `DESIGN.md` → *Client parity* is the endpoint-by-endpoint audit
-- `/health` is the exception: it exists for orchestrators, not people
+- The web, desktop and Android clients are separate front ends over one API, and each of them reaches all but two of the 52 endpoints the server exposes — sessions, admin users, account closure, import/export, image upload, share expiry and reading someone else's share link included. `DESIGN.md` → *Client parity* is the endpoint-by-endpoint audit
+- Two endpoints are exceptions, both listed there: `/health` (for orchestrators, not people) and `GET /api/images/:filename` — every client uploads images, but only the browser displays them inline so far
 
 **Lists**
 - `GET /api/notes` returns snippets rather than whole note bodies (`?full=1` opts back in), takes `?limit=`/`?offset=`, and reports the unpaged total in `X-Total-Count`
@@ -110,9 +110,10 @@ A self-hosted markdown notes app. Write, organise, link, and share notes with fu
 - All HTTP happens in the main process — the renderer is sandboxed, has no Node and never sees the session cookie
 - Editor with live preview, split view, clickable task checkboxes, outline, wiki links, backlinks, version diff and share-link management
 - The same conflict handling as the other clients: a stale save gets a `409` and a choice, never a silent overwrite
-- Native menus and shortcuts (`Ctrl+N` new, `Ctrl+D` journal, `Ctrl+S` save, `Ctrl+F` search, `Ctrl+E` preview, `Ctrl+1…6` views)
+- Native menus and shortcuts (`Ctrl+N` new, `Ctrl+D` journal, `Ctrl+S` save, `Ctrl+F` search, `Ctrl+E` preview, `Ctrl+1…9` views)
 - Tray icon and a global quick-capture hotkey (`Ctrl+Shift+N` by default) that works while the window is hidden
-- "Save note as…" and "Export all notes…" write straight to disk through native dialogs
+- "Save note as…", "Export all notes…", "Import notes…" and "Insert image…" all go through native dialogs; an image already on the clipboard uploads without one
+- Sessions, users, account and shared-link screens cover the endpoints a desktop app has no other way to reach
 - The last note list is cached on disk: with the server unreachable a signed-in user still sees their notes, with a "try again" banner rather than a login screen
 
 **Android client**
@@ -120,8 +121,8 @@ A self-hosted markdown notes app. Write, organise, link, and share notes with fu
 - **Offline-first**: every screen reads from a local Room database, so the app opens and edits with no network at all
 - Edits queue locally and sync when they can; the list shows how many changes are waiting
 - Conflicts are kept, not resolved silently — a rejected push stores both copies and the editor offers "keep mine" or "use theirs"
-- Search, tag and folder filters all run against the local store, so they work offline too
-- Trash, tags and folders, templates, journal, statistics, version history, share links, image upload and password change — parity with the web app for everything that has meaning on a phone
+- Search, tag and folder filters all run against the local store, so they work offline too; a separate screen runs the server's ranked search when the extra reach is wanted
+- Full API parity with the web app: trash, tags and folders, templates, the journal (any day), statistics, version history, share links with passwords and expiry, image upload, import and export through the system file picker, signed-in devices, the admin user list, password change and account closure, and a reader for a share link someone sent you
 - Share sheet target: send text from any app straight into a new note
 - Home-screen widget with one-tap "new note" and "today's journal"
 - Optional app lock using biometrics or the device PIN
@@ -141,7 +142,7 @@ A self-hosted markdown notes app. Write, organise, link, and share notes with fu
 | Import | `archive/zip`, `gopkg.in/yaml.v3` (front matter) |
 | Desktop | Electron 31, esbuild, marked + DOMPurify (no renderer framework) |
 | Android | Kotlin, Jetpack Compose, Room (offline store), Retrofit + OkHttp, androidx.biometric (minSdk 26, targetSdk 34) |
-| Deployment | Docker Compose (two containers + named volume) |
+| Deployment | Docker Compose (two containers; the database and uploads bind-mount to `./data`) |
 
 ## Run
 
@@ -180,7 +181,8 @@ the targets.
 |---|---|
 | `make build` | Backend binary (with FTS5), web bundle, desktop bundle |
 | `make build-android` | Debug APK |
-| `make test` | Every unit suite that needs no device (Go ×2 build modes, web, desktop) |
+| `make test` | `check-ignore`, then every unit suite that needs no device (Go ×2 build modes, web, desktop) |
+| `make check-ignore` | Git-only check that `.gitignore` covers the build output and nothing else |
 | `make test-android` | Android unit tests (Robolectric, no emulator) |
 | `make e2e` | Hermetic backend end-to-end run in Docker |
 | `make e2e-desktop` | Drives the real desktop app against a running server |
@@ -365,38 +367,38 @@ greynote/
 │   ├── Dockerfile
 │   └── go.mod
 ├── frontend/
-    ├── src/
-    │   ├── App.jsx            # shell, routing
-    │   ├── auth.jsx           # AuthProvider, useAuth
-    │   ├── theme.jsx / .css   # dark mode provider + CSS variables
-    │   ├── api.js             # apiFetch helper
-    │   ├── wikilinks.js       # [[link]] parsing / rewriting (shared by editor + preview)
-    │   ├── markdown.js        # task toggling, heading extraction, slugs
-    │   ├── editor.js          # toolbar transforms, list continuation, indent
-    │   ├── diff.js            # line diff for version history
-    │   ├── components/
-    │   │   ├── CommandPalette.jsx
-    │   │   ├── Snippet.jsx     # renders highlighted search excerpts
-    │   │   ├── EditorToolbar.jsx
-    │   │   ├── Outline.jsx
-    │   │   ├── VersionDiff.jsx
-    │   │   └── MarkdownRenderer.jsx
-    │   └── pages/
-    │       ├── Login.jsx
-    │       ├── Notes.jsx       # list, search, tag filter, import, bulk export
-    │       ├── NoteEdit.jsx    # editor, sharing, versions, links, conflicts
-    │       ├── NewNote.jsx     # create-and-open (target of unresolved links)
-    │       ├── Tags.jsx        # tag rename / merge / remove
-    │       ├── Templates.jsx   # template CRUD and "use"
-    │       ├── Daily.jsx       # journal browser
-    │       ├── Trash.jsx       # restore, delete forever, empty trash
-    │       ├── ShareView.jsx   # public share viewer
-    │       ├── Sessions.jsx    # session list + revoke
-    │       ├── Settings.jsx    # change password, delete account
-    │       ├── Stats.jsx       # statistics page
-    │       └── AdminUsers.jsx
-    ├── vite.config.js
-    └── Dockerfile
+│   ├── src/
+│   │   ├── App.jsx            # shell, routing
+│   │   ├── auth.jsx           # AuthProvider, useAuth
+│   │   ├── theme.jsx / .css   # dark mode provider + CSS variables
+│   │   ├── api.js             # apiFetch helper
+│   │   ├── wikilinks.js       # [[link]] parsing / rewriting (shared by editor + preview)
+│   │   ├── markdown.js        # task toggling, heading extraction, slugs
+│   │   ├── editor.js          # toolbar transforms, list continuation, indent
+│   │   ├── diff.js            # line diff for version history
+│   │   ├── components/
+│   │   │   ├── CommandPalette.jsx
+│   │   │   ├── Snippet.jsx     # renders highlighted search excerpts
+│   │   │   ├── EditorToolbar.jsx
+│   │   │   ├── Outline.jsx
+│   │   │   ├── VersionDiff.jsx
+│   │   │   └── MarkdownRenderer.jsx
+│   │   └── pages/
+│   │       ├── Login.jsx
+│   │       ├── Notes.jsx       # list, search, tag filter, import, bulk export
+│   │       ├── NoteEdit.jsx    # editor, sharing, versions, links, conflicts
+│   │       ├── NewNote.jsx     # create-and-open (target of unresolved links)
+│   │       ├── Tags.jsx        # tag rename / merge / remove
+│   │       ├── Templates.jsx   # template CRUD and "use"
+│   │       ├── Daily.jsx       # journal browser
+│   │       ├── Trash.jsx       # restore, delete forever, empty trash
+│   │       ├── ShareView.jsx   # public share viewer
+│   │       ├── Sessions.jsx    # session list + revoke
+│   │       ├── Settings.jsx    # change password, delete account
+│   │       ├── Stats.jsx       # statistics page
+│   │       └── AdminUsers.jsx
+│   ├── vite.config.js
+│   └── Dockerfile
 ├── electron/                 # desktop client
 │   ├── main/                 # window, menus, tray, HTTP client, settings + cache
 │   │   ├── api.js            # every call to the backend
