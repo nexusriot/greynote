@@ -2,7 +2,10 @@ package main
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 )
@@ -152,5 +155,60 @@ func TestFoldersAreScopedPerUser(t *testing.T) {
 
 	if got := env.getNote(bob, bobNote).Folder; got != "Shared" {
 		t.Errorf("another user's folder was renamed: %q", got)
+	}
+}
+
+// A path longer than the limit is cut to length. Counting bytes rather than
+// runes splits a multi-byte character in half, and the invalid UTF-8 that
+// leaves behind is replaced with U+FFFD on the way out — so the path the API
+// reports no longer matches the one in the database and the folder becomes
+// unreachable.
+func TestNormalizeFolderTruncatesOnCharacterBoundaries(t *testing.T) {
+	cases := []struct{ name, in string }{
+		{"three-byte runes", strings.Repeat("あ", 70)},
+		{"two-byte runes", strings.Repeat("ф", 150)},
+		{"four-byte runes", strings.Repeat("😀", 80)},
+		{"mixed", strings.Repeat("aあ", 120)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeFolder(tc.in)
+			if !utf8.ValidString(got) {
+				t.Fatalf("normalizeFolder produced invalid UTF-8: %q", got)
+			}
+			if strings.ContainsRune(got, utf8.RuneError) {
+				t.Errorf("normalizeFolder left a replacement character in %q", got)
+			}
+			if n := utf8.RuneCountInString(got); n > folderMaxPathLength {
+				t.Errorf("normalizeFolder kept %d runes, want at most %d", n, folderMaxPathLength)
+			}
+			if got == "" {
+				t.Error("a long path should be shortened, not dropped")
+			}
+		})
+	}
+}
+
+// The folder a note reports must be the one it can be filtered by; a truncated
+// path that round-trips through JSON as U+FFFD silently matches nothing.
+func TestLongUnicodeFolderStaysFilterable(t *testing.T) {
+	env := newTestEnv(t)
+	_, cookie := env.user("utf8folder@example.com")
+
+	env.createNoteIn(cookie, "Deep", strings.Repeat("あ", 70))
+
+	var notes []noteDTO
+	env.do(http.MethodGet, "/api/notes", nil, cookie).expect(http.StatusOK).decode(&notes)
+	if len(notes) != 1 {
+		t.Fatalf("expected the note back, got %d", len(notes))
+	}
+	folder := notes[0].Folder
+	if strings.ContainsRune(folder, utf8.RuneError) {
+		t.Fatalf("stored folder came back mangled: %q", folder)
+	}
+
+	filtered := env.listNotes(cookie, "?folder="+url.QueryEscape(folder))
+	if len(filtered) != 1 {
+		t.Errorf("filtering by the folder the API reports returned %d notes, want 1", len(filtered))
 	}
 }

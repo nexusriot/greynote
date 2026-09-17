@@ -317,6 +317,190 @@ class NotesRepositoryTest {
         second.shutdown()
     }
 
+    @Test
+    fun `sync reports where a locally created note ended up`() = runTest {
+        val localId = repo.create(title = "New", content = "body")
+        routes = { request ->
+            when {
+                request.method == "POST" && request.path == "/api/notes" -> json("""{"id":42}""", 201)
+                request.method == "GET" -> json("""[{"id":42,"title":"New","content":"body","updatedAt":"v1"}]""")
+                else -> notFound()
+            }
+        }
+
+        val result = repo.sync()
+
+        assertEquals(
+            "a screen holding the placeholder id has to be told the note moved",
+            mapOf(localId to 42L),
+            result.adopted,
+        )
+    }
+
+    @Test
+    fun `an edit that follows the adopted id is saved, not dropped`() = runTest {
+        // The editor stays open across the first push. Writing back to the
+        // placeholder id would hit a row that no longer exists and lose the
+        // edit without a word, which is what makes this worth a test.
+        val localId = repo.create(title = "New", content = "body")
+        routes = { request ->
+            when {
+                request.method == "POST" && request.path == "/api/notes" -> json("""{"id":42}""", 201)
+                request.method == "GET" -> json("""[{"id":42,"title":"New","content":"body","updatedAt":"v1"}]""")
+                else -> notFound()
+            }
+        }
+        val adoptedId = repo.sync().adopted.getValue(localId)
+
+        assertTrue(repo.save(adoptedId, "New", "body plus more", "", ""))
+        assertEquals("body plus more", dao.find(adoptedId)!!.content)
+    }
+
+    @Test
+    fun `saving against an id that no longer exists reports failure`() = runTest {
+        assertFalse(
+            "a silent no-op here is how an edit disappears",
+            repo.save(-99, "ghost", "body", "", ""),
+        )
+    }
+
+    @Test
+    fun `a note created offline and then edited keeps both changes`() = runTest {
+        val localId = repo.create(title = "Draft", content = "first")
+        repo.save(localId, "Draft", "first and second", "", "")
+
+        routes = { request ->
+            when {
+                request.method == "POST" && request.path == "/api/notes" -> json("""{"id":42}""", 201)
+                request.method == "GET" -> json(
+                    """[{"id":42,"title":"Draft","content":"first and second","updatedAt":"v1"}]"""
+                )
+                else -> notFound()
+            }
+        }
+        val result = repo.sync()
+
+        val posted = seen.first { it.method == "POST" }.body.readUtf8()
+        assertTrue("the offline edit must be part of the create", posted.contains("first and second"))
+        assertEquals(mapOf(localId to 42L), result.adopted)
+        assertEquals("first and second", dao.find(42)!!.content)
+    }
+
+    @Test
+    fun `a push that fails reports no adoption for that note`() = runTest {
+        val localId = repo.create(title = "New", content = "body")
+        routes = { MockResponse().setResponseCode(500) }
+
+        val result = repo.sync()
+
+        assertFalse(result.ok)
+        assertTrue("nothing was adopted, so nothing may be reported", result.adopted.isEmpty())
+        assertNotNull("the placeholder row survives to be retried", dao.find(localId))
+    }
+
+    @Test
+    fun `several notes created offline each report their own server id`() = runTest {
+        val first = repo.create(title = "One")
+        val second = repo.create(title = "Two")
+        assertTrue("placeholders must not collide", first != second)
+
+        var nextId = 100L
+        routes = { request ->
+            when {
+                request.method == "POST" && request.path == "/api/notes" -> json("""{"id":${nextId++}}""", 201)
+                request.method == "GET" -> json(
+                    """[{"id":100,"title":"One","updatedAt":"v1"},{"id":101,"title":"Two","updatedAt":"v1"}]"""
+                )
+                else -> notFound()
+            }
+        }
+
+        val result = repo.sync()
+
+        assertEquals(2, result.adopted.size)
+        assertEquals(setOf(100L, 101L), result.adopted.values.toSet())
+        assertEquals(setOf(first, second), result.adopted.keys)
+    }
+
+    @Test
+    fun `a library past the SQLite variable ceiling still syncs`() = runTest {
+        // One NOT IN (…) over every note kept binds a variable per note, and
+        // SQLite refuses past 999 of them on the Android versions this app
+        // supports — so the sync would fail outright for a large library.
+        val kept = 1500
+        for (id in 1..kept) {
+            dao.upsert(serverNote(id = id.toLong(), title = "Note $id", updatedAt = "v1"))
+        }
+        dao.upsert(serverNote(id = 9001, title = "Removed elsewhere", updatedAt = "v1"))
+
+        val page = { from: Int, to: Int ->
+            (from..to).joinToString(",") { """{"id":$it,"title":"Note $it","updatedAt":"v1"}""" }
+        }
+        routes = { request ->
+            when {
+                request.path.orEmpty().contains("offset=0") -> json("[${page(1, 200)}]")
+                request.path.orEmpty().contains("offset=200") -> json("[${page(201, 400)}]")
+                request.path.orEmpty().contains("offset=400") -> json("[${page(401, 600)}]")
+                request.path.orEmpty().contains("offset=600") -> json("[${page(601, 800)}]")
+                request.path.orEmpty().contains("offset=800") -> json("[${page(801, 1000)}]")
+                request.path.orEmpty().contains("offset=1000") -> json("[${page(1001, 1200)}]")
+                request.path.orEmpty().contains("offset=1200") -> json("[${page(1201, 1400)}]")
+                request.path.orEmpty().contains("offset=1400") -> json("[${page(1401, kept)}]")
+                else -> notFound()
+            }
+        }
+
+        val result = repo.sync()
+
+        assertEquals("a large library must not break the sync", null, result.error)
+        assertEquals(kept, result.pulled)
+        assertNotNull("everything the server still lists stays", dao.find(1))
+        assertNotNull(dao.find(kept.toLong()))
+        assertNull("what the server dropped goes", dao.find(9001))
+    }
+
+    @Test
+    fun `an empty listing clears the cached notes`() = runTest {
+        // The boundary the batching has to get right at the other end: nothing
+        // to keep means everything clean goes.
+        dao.upsert(serverNote(id = 1, title = "Gone", updatedAt = "v1"))
+        dao.upsert(serverNote(id = 2, title = "Also gone", updatedAt = "v1"))
+
+        routes = { emptyList() }
+        val result = repo.sync()
+
+        assertTrue(result.ok)
+        assertEquals(0, result.pulled)
+        assertNull(dao.find(1))
+        assertNull(dao.find(2))
+    }
+
+    @Test
+    fun `an unpushed note is never removed by a pull that omits it`() = runTest {
+        dao.upsert(serverNote(id = 1, title = "Gone", updatedAt = "v1"))
+        val draft = repo.create(title = "Local draft", content = "not sent yet")
+
+        routes = { request ->
+            when {
+                // The create fails, so the draft is still only on the device.
+                request.method == "POST" -> MockResponse().setResponseCode(500)
+                request.method == "GET" -> emptyList()
+                else -> notFound()
+            }
+        }
+        repo.sync()
+        // The failed push stops that sync; the pull lands on the next one.
+        routes = { request ->
+            when {
+                request.method == "POST" -> MockResponse().setResponseCode(500)
+                else -> notFound()
+            }
+        }
+
+        assertNotNull("a draft that never reached the server must survive", dao.find(draft))
+        assertEquals("not sent yet", dao.find(draft)!!.content)
+    }
+
     private fun serverNote(id: Long, title: String, updatedAt: String) =
         com.greynote.app.data.db.NoteEntity(
             id = id,

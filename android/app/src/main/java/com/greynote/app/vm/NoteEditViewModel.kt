@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.greynote.app.Graph
 import com.greynote.app.api.ApiClient
 import com.greynote.app.data.NotesRepository
+import com.greynote.app.data.SyncResult
 import com.greynote.app.data.db.NoteEntity
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -70,6 +71,7 @@ class NoteEditViewModel(
     }
 
     private fun apply(note: NoteEntity) {
+        loadedId = note.id
         _state.update {
             it.copy(
                 id = note.id,
@@ -87,6 +89,40 @@ class NoteEditViewModel(
         }
     }
 
+    /**
+     * Refreshes the editor from the stored note, but leaves the text alone if
+     * the user has typed since the save went out: a sync round trip can easily
+     * outlast the next keystroke, and overwriting the field would throw those
+     * characters away.
+     */
+    private fun refresh(note: NoteEntity) {
+        val stillEditing = !_state.value.saved
+        if (!stillEditing) {
+            apply(note)
+            return
+        }
+        loadedId = note.id
+        _state.update {
+            it.copy(
+                id = note.id,
+                isPinned = note.isPinned,
+                loading = false,
+                pendingUpload = note.dirty,
+                conflictTitle = if (note.conflict) note.serverTitle else null,
+                conflictContent = if (note.conflict) note.serverContent else null,
+            )
+        }
+    }
+
+    /**
+     * Where a note ended up after a sync. A note created on this device is
+     * re-keyed from its negative placeholder onto the id the server assigned,
+     * and an editor left pointing at the old one writes to a row that no longer
+     * exists — so every later edit would vanish without a word.
+     */
+    private fun followId(before: Long, result: SyncResult): Long =
+        result.adopted[before] ?: before
+
     fun setTitle(v: String) = _state.update { it.copy(title = v, saved = false) }
     fun setContent(v: String) = _state.update { it.copy(content = v, saved = false) }
     fun setTags(v: String) = _state.update { it.copy(tags = v, saved = false) }
@@ -98,11 +134,15 @@ class NoteEditViewModel(
         val s = _state.value
         viewModelScope.launch {
             _state.update { it.copy(saving = true, error = null) }
-            repo.save(s.id, s.title, s.content, s.tags, s.folder)
+            if (!repo.save(s.id, s.title, s.content, s.tags, s.folder)) {
+                // Better a visible failure than a save that quietly went nowhere.
+                _state.update { it.copy(saving = false, error = "This note is no longer on the device") }
+                return@launch
+            }
             _state.update { it.copy(saving = false, saved = true, pendingUpload = true) }
             if (thenSync) {
-                repo.sync()
-                repo.find(s.id)?.let { apply(it) }
+                val id = followId(s.id, repo.sync())
+                repo.find(id)?.let { refresh(it) }
             }
         }
     }
@@ -112,7 +152,8 @@ class NoteEditViewModel(
         viewModelScope.launch {
             repo.setPinned(s.id, !s.isPinned)
             _state.update { it.copy(isPinned = !s.isPinned) }
-            repo.sync()
+            val id = followId(s.id, repo.sync())
+            repo.find(id)?.let { refresh(it) }
         }
     }
 
@@ -127,10 +168,10 @@ class NoteEditViewModel(
     }
 
     fun keepMine() {
-        val id = _state.value.id
+        val before = _state.value.id
         viewModelScope.launch {
-            repo.resolveKeepMine(id)
-            repo.sync()
+            repo.resolveKeepMine(before)
+            val id = followId(before, repo.sync())
             repo.find(id)?.let { apply(it) }
         }
     }

@@ -65,8 +65,12 @@ interface NoteDao {
     @Query("DELETE FROM notes WHERE id = :id")
     suspend fun deleteById(id: Long)
 
-    @Query("DELETE FROM notes WHERE dirty = 0 AND pendingDelete = 0 AND id NOT IN (:keep)")
-    suspend fun deleteMissing(keep: List<Long>)
+    /** Ids of rows that hold nothing the server has not already been told. */
+    @Query("SELECT id FROM notes WHERE dirty = 0 AND pendingDelete = 0")
+    suspend fun cleanIds(): List<Long>
+
+    @Query("DELETE FROM notes WHERE dirty = 0 AND pendingDelete = 0 AND id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>)
 
     @Query("DELETE FROM notes")
     suspend fun clear()

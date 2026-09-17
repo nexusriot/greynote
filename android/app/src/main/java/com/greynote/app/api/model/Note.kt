@@ -102,7 +102,9 @@ data class MoveFolderRequest(val from: String, val to: String)
 
 data class FolderMutationResponse(val path: String = "", val notesUpdated: Int = 0)
 
-data class ShareRequest(val expiresAt: String = "")
+// Null, so Gson leaves the field out entirely: sending an empty expiresAt reads
+// as "this link never expires" and would wipe an expiry the owner had set.
+data class ShareRequest(val expiresAt: String? = null)
 
 data class ShareResponse(val token: String = "", val shareUrl: String = "")
 

@@ -19,6 +19,12 @@ data class SyncResult(
     val pulled: Int = 0,
     val conflicts: Int = 0,
     val error: String? = null,
+    /**
+     * Placeholder id -> server id, for notes that reached the server this run.
+     * A screen holding one of those ids is pointing at a row that no longer
+     * exists and has to follow the note to its new one.
+     */
+    val adopted: Map<Long, Long> = emptyMap(),
 ) {
     val ok: Boolean get() = error == null
 }
@@ -71,8 +77,12 @@ class NotesRepository(
         return id
     }
 
-    suspend fun save(id: Long, title: String, content: String, tags: String, folder: String) {
-        val existing = dao.find(id) ?: return
+    /**
+     * Writes an edit to the local store. Returns false when the row is gone —
+     * the caller is holding a stale id and must not report the edit as saved.
+     */
+    suspend fun save(id: Long, title: String, content: String, tags: String, folder: String): Boolean {
+        val existing = dao.find(id) ?: return false
         dao.update(
             existing.copy(
                 title = title,
@@ -83,6 +93,7 @@ class NotesRepository(
                 dirty = true,
             )
         )
+        return true
     }
 
     suspend fun setPinned(id: Long, pinned: Boolean) {
@@ -127,6 +138,7 @@ class NotesRepository(
     suspend fun sync(): SyncResult {
         var pushed = 0
         var conflicts = 0
+        val adopted = mutableMapOf<Long, Long>()
 
         try {
             for (note in dao.pendingDeletes()) {
@@ -136,28 +148,39 @@ class NotesRepository(
                     dao.delete(note)
                     pushed++
                 } else {
-                    return SyncResult(pushed = pushed, error = "Delete failed (${res.code()})")
+                    return SyncResult(pushed = pushed, error = "Delete failed (${res.code()})", adopted = adopted)
                 }
             }
 
             for (note in dao.dirtyNotes()) {
                 if (note.conflict) continue
-                val outcome = push(note)
-                when (outcome) {
-                    PushOutcome.PUSHED -> pushed++
-                    PushOutcome.CONFLICT -> conflicts++
-                    PushOutcome.FAILED -> return SyncResult(pushed = pushed, conflicts = conflicts, error = "Upload failed")
+                when (val outcome = push(note)) {
+                    is PushOutcome.Pushed -> {
+                        pushed++
+                        outcome.adoptedId?.let { adopted[note.id] = it }
+                    }
+                    PushOutcome.Conflict -> conflicts++
+                    PushOutcome.Failed -> return SyncResult(
+                        pushed = pushed, conflicts = conflicts, error = "Upload failed", adopted = adopted,
+                    )
                 }
             }
 
             val pulled = pull()
-            return SyncResult(pushed = pushed, pulled = pulled, conflicts = conflicts)
+            return SyncResult(pushed = pushed, pulled = pulled, conflicts = conflicts, adopted = adopted)
         } catch (e: Exception) {
-            return SyncResult(pushed = pushed, conflicts = conflicts, error = e.message ?: "Network error")
+            return SyncResult(
+                pushed = pushed, conflicts = conflicts, error = e.message ?: "Network error", adopted = adopted,
+            )
         }
     }
 
-    private enum class PushOutcome { PUSHED, CONFLICT, FAILED }
+    private sealed interface PushOutcome {
+        /** [adoptedId] is set when the row was re-keyed onto a fresh server id. */
+        data class Pushed(val adoptedId: Long? = null) : PushOutcome
+        object Conflict : PushOutcome
+        object Failed : PushOutcome
+    }
 
     private suspend fun push(note: NoteEntity): PushOutcome {
         val body = NoteUpsertRequest(
@@ -171,17 +194,18 @@ class NotesRepository(
         if (note.isLocalOnly) {
             val res = api.createNote(body)
             val newId = res.body()?.id
-            if (!res.isSuccessful || newId == null) return PushOutcome.FAILED
-            // The placeholder row is replaced by one keyed on the server id.
+            if (!res.isSuccessful || newId == null) return PushOutcome.Failed
+            // The placeholder row is replaced by one keyed on the server id, so
+            // the caller is told where the note went.
             dao.delete(note)
             dao.upsert(note.copy(id = newId, dirty = false, localUpdatedAt = ""))
-            return PushOutcome.PUSHED
+            return PushOutcome.Pushed(adoptedId = newId)
         }
 
         val res = api.updateNote(note.id, body, note.updatedAt.ifBlank { null })
         if (res.isSuccessful) {
             dao.update(note.copy(dirty = false, updatedAt = res.body()?.updatedAt ?: note.updatedAt, localUpdatedAt = ""))
-            return PushOutcome.PUSHED
+            return PushOutcome.Pushed()
         }
         if (res.code() == 409) {
             val theirs = parseConflict(res.errorBody()?.string())
@@ -193,14 +217,14 @@ class NotesRepository(
                     serverUpdatedAt = theirs?.updatedAt,
                 )
             )
-            return PushOutcome.CONFLICT
+            return PushOutcome.Conflict
         }
         if (res.code() == 404) {
             // Deleted on the server while we were away; drop the local copy.
             dao.delete(note)
-            return PushOutcome.PUSHED
+            return PushOutcome.Pushed()
         }
-        return PushOutcome.FAILED
+        return PushOutcome.Failed
     }
 
     private suspend fun pull(): Int {
@@ -223,8 +247,22 @@ class NotesRepository(
             rows += note.toEntity()
         }
         dao.upsertAll(rows)
-        dao.deleteMissing(remote.map { it.id })
+        dropNotesMissingFrom(remote.mapTo(mutableSetOf()) { it.id })
         return remote.size
+    }
+
+    /**
+     * Removes the local copies of notes the server no longer lists.
+     *
+     * Worked out in Kotlin and deleted in batches rather than as one
+     * `NOT IN (…)`: that binds one variable per note kept, and SQLite caps a
+     * statement at 999 of them on the Android versions this app still supports —
+     * so a library past a thousand notes would fail every sync. The list here is
+     * only as long as the number of notes actually gone.
+     */
+    private suspend fun dropNotesMissingFrom(remoteIds: Set<Long>) {
+        val stale = dao.cleanIds().filterNot { it in remoteIds }
+        stale.chunked(DELETE_BATCH).forEach { dao.deleteByIds(it) }
     }
 
     /**
@@ -248,6 +286,9 @@ class NotesRepository(
 
     companion object {
         private const val PAGE_SIZE = 200
+
+        /** Well under SQLite's 999-variable ceiling on older Android releases. */
+        private const val DELETE_BATCH = 400
     }
 }
 

@@ -32,9 +32,13 @@ func normalizeFolder(path string) string {
 		}
 	}
 
+	// Counted in runes, not bytes: cutting a path at a byte offset can land in
+	// the middle of a multi-byte character, and the invalid UTF-8 that leaves in
+	// the database comes back out as U+FFFD, so the folder can never be matched
+	// by the very path the API reports.
 	out := strings.Join(segments, "/")
-	if len(out) > folderMaxPathLength {
-		out = out[:folderMaxPathLength]
+	if runes := []rune(out); len(runes) > folderMaxPathLength {
+		out = string(runes[:folderMaxPathLength])
 		if i := strings.LastIndex(out, "/"); i > 0 {
 			out = out[:i]
 		}

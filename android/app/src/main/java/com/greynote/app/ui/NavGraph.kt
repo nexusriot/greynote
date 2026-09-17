@@ -95,6 +95,13 @@ fun NavGraph(pending: PendingAction? = null, onPendingHandled: () -> Unit = {}) 
                 noteId = noteId,
                 onBack = { nav.popBackStack() },
                 onOpenTools = { id -> nav.navigate(noteTools(id)) },
+                // Swap the placeholder route for the real one in place, so Back
+                // still leads to the list rather than to a note that is gone.
+                onIdAdopted = { id ->
+                    nav.navigate(noteEdit(id)) {
+                        popUpTo(noteEdit(noteId)) { inclusive = true }
+                    }
+                },
             )
         }
 

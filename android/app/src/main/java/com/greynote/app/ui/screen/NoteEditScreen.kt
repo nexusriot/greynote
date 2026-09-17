@@ -30,6 +30,13 @@ fun NoteEditScreen(
     noteId: Long,
     onBack: () -> Unit,
     onOpenTools: (Long) -> Unit,
+    /**
+     * Called when a note created on this device is re-keyed onto the id the
+     * server gave it, so the route stops pointing at a row that is gone — the
+     * placeholder id would not survive a rotation or a trip through the
+     * background.
+     */
+    onIdAdopted: (Long) -> Unit = {},
     vm: NoteEditViewModel = viewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
@@ -38,6 +45,9 @@ fun NoteEditScreen(
     var showDeleteDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(noteId) { vm.load(noteId) }
+    LaunchedEffect(state.id) {
+        if (state.id != 0L && state.id != noteId) onIdAdopted(state.id)
+    }
     LaunchedEffect(state.deleted) { if (state.deleted) onBack() }
     LaunchedEffect(state.error) {
         state.error?.let {
@@ -84,7 +94,10 @@ fun NoteEditScreen(
                     IconButton(onClick = { pickImage.launch("image/*") }, enabled = !state.uploading) {
                         Icon(Icons.Default.Image, contentDescription = "Attach image")
                     }
-                    IconButton(onClick = { onOpenTools(noteId) }) {
+                    // state.id, not noteId: a note created here is re-keyed onto
+                    // the server's id on its first push, and the tools screen
+                    // talks to the server.
+                    IconButton(onClick = { onOpenTools(state.id) }, enabled = state.id > 0) {
                         Icon(Icons.Default.History, contentDescription = "History and sharing")
                     }
                     IconButton(onClick = { showDeleteDialog = true }) {

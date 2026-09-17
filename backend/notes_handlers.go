@@ -269,25 +269,9 @@ func (h *NotesHandlers) Update(c *gin.Context) {
 
 	// Optimistic concurrency: a client that sends the updatedAt it loaded gets a
 	// 409 instead of silently overwriting a newer save from another device.
-	if base := clientBaseVersion(c, req.BaseUpdatedAt); base != "" && base != oldUpdatedAt {
-		current, err := h.loadNote(userID, id)
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-			return
-		}
-		c.JSON(http.StatusConflict, gin.H{
-			"error":   "this note was changed elsewhere since you loaded it",
-			"current": current,
-		})
-		return
-	}
-
-	_, _ = h.DB.Exec(
-		`INSERT INTO note_versions(note_id, title, content, tags, saved_at) VALUES(?,?,?,?,?)`,
-		id, oldTitle, oldContent, oldTags, oldUpdatedAt,
-	)
-	if err := pruneNoteVersions(h.DB, id, h.MaxVersions); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
+	base := clientBaseVersion(c, req.BaseUpdatedAt)
+	if base != "" && base != oldUpdatedAt {
+		h.respondConflict(c, userID, id)
 		return
 	}
 
@@ -296,17 +280,45 @@ func (h *NotesHandlers) Update(c *gin.Context) {
 		isPinned = 1
 	}
 	updatedAt := nextVersionStamp(oldUpdatedAt)
-	res, err := h.DB.Exec(
-		`UPDATE notes SET title=?, content=?, tags=?, folder=?, is_pinned=?, updated_at=?
-		 WHERE id=? AND user_id=? AND deleted_at IS NULL`,
-		req.Title, req.Content, req.Tags, normalizeFolder(req.Folder), isPinned, updatedAt, id, userID,
-	)
+
+	// The read above and the write below are two statements, so a second save
+	// can slip between them and pass the same check. Carrying the base version
+	// into the WHERE clause makes the guard part of the write itself: SQLite
+	// serialises the two UPDATEs and the loser matches no rows.
+	query := `UPDATE notes SET title=?, content=?, tags=?, folder=?, is_pinned=?, updated_at=?
+		 WHERE id=? AND user_id=? AND deleted_at IS NULL`
+	args := []any{req.Title, req.Content, req.Tags, normalizeFolder(req.Folder), isPinned, updatedAt, id, userID}
+	if base != "" {
+		query += ` AND updated_at=?`
+		args = append(args, base)
+	}
+
+	res, err := h.DB.Exec(query, args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
 	if aff, _ := res.RowsAffected(); aff == 0 {
+		// With a base version the likely cause is that someone else got there
+		// first, which is a conflict rather than a missing note.
+		if base != "" {
+			if _, err := h.loadNote(userID, id); err == nil {
+				h.respondConflict(c, userID, id)
+				return
+			}
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+
+	// Snapshot the state we replaced only once the write is known to have won,
+	// so a rejected save leaves no version behind.
+	_, _ = h.DB.Exec(
+		`INSERT INTO note_versions(note_id, title, content, tags, saved_at) VALUES(?,?,?,?,?)`,
+		id, oldTitle, oldContent, oldTags, oldUpdatedAt,
+	)
+	if err := pruneNoteVersions(h.DB, id, h.MaxVersions); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "db error"})
 		return
 	}
 
@@ -320,6 +332,20 @@ func (h *NotesHandlers) Update(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"updatedAt": updatedAt})
+}
+
+// respondConflict answers a save that lost to a newer one, handing back the
+// copy the server holds so the client can offer a choice.
+func (h *NotesHandlers) respondConflict(c *gin.Context, userID, id int64) {
+	current, err := h.loadNote(userID, id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	c.JSON(http.StatusConflict, gin.H{
+		"error":   "this note was changed elsewhere since you loaded it",
+		"current": current,
+	})
 }
 
 // pruneNoteVersions drops the oldest history entries beyond the cap. Without it
@@ -500,24 +526,32 @@ func (h *NotesHandlers) CreateOrEnableShare(c *gin.Context) {
 		return
 	}
 
+	// A pointer so "no expiresAt field" is distinguishable from "expiresAt is
+	// empty": re-enabling a link must not silently lift an expiry the owner set,
+	// which would republish a link they expected to have gone dark. Clearing one
+	// on purpose is what PUT /share/expiry with "" is for.
 	var req struct {
-		ExpiresAt string `json:"expiresAt"`
+		ExpiresAt *string `json:"expiresAt"`
 	}
 	_ = c.ShouldBindJSON(&req)
 
 	var expiresAt sql.NullString
-	if req.ExpiresAt != "" {
-		if _, err := time.Parse(time.RFC3339, req.ExpiresAt); err != nil {
+	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
+		if _, err := time.Parse(time.RFC3339, *req.ExpiresAt); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expiresAt, use RFC3339"})
 			return
 		}
-		expiresAt = sql.NullString{String: req.ExpiresAt, Valid: true}
+		expiresAt = sql.NullString{String: *req.ExpiresAt, Valid: true}
 	}
 
 	var token string
 	err := h.DB.QueryRow(`SELECT token FROM share_links WHERE note_id=?`, noteID).Scan(&token)
 	if err == nil {
-		_, _ = h.DB.Exec(`UPDATE share_links SET is_enabled=1, expires_at=? WHERE note_id=?`, expiresAt, noteID)
+		if req.ExpiresAt == nil {
+			_, _ = h.DB.Exec(`UPDATE share_links SET is_enabled=1 WHERE note_id=?`, noteID)
+		} else {
+			_, _ = h.DB.Exec(`UPDATE share_links SET is_enabled=1, expires_at=? WHERE note_id=?`, expiresAt, noteID)
+		}
 	} else {
 		token, err = randomTokenURLSafe(24)
 		if err != nil {
